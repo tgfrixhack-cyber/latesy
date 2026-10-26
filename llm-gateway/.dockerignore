@@ -1,0 +1,6 @@
+data
+data_test
+tests
+**/__pycache__
+.env
+*.zip
