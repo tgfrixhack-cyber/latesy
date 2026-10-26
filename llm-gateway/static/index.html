@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{SITE_NAME}} — GPT и Claude по API с оплатой в рублях</title>
+<meta name="description" content="OpenAI-совместимый API ко всем популярным языковым моделям. Один ключ, оплата по фактическим токенам через СБП, карту или криптовалюту.">
+<meta name="theme-color" content="#F3F1EB">
+<link rel="canonical" href="{{PUBLIC_URL}}/">
+<meta property="og:type" content="website">
+<meta property="og:locale" content="ru_RU">
+<meta property="og:url" content="{{PUBLIC_URL}}/">
+<meta property="og:image" content="{{PUBLIC_URL}}/static/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta property="og:title" content="{{SITE_NAME}} — GPT и Claude по API с оплатой в рублях">
+<meta property="og:site_name" content="{{SITE_NAME}}">
+<meta property="og:description" content="Один OpenAI-совместимый ключ ко всем моделям. Оплата по токенам, без подписки.">
+<link rel="icon" href="/static/favicon.svg?v={{V}}" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/Onest-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/Onest-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/fonts/fonts.css?v={{V}}">
+<link rel="stylesheet" href="/static/style.css?v={{V}}">
+<link rel="stylesheet" href="/static/fx.css?v={{V}}">
+<link rel="stylesheet" href="/static/landing.css?v={{V}}">
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light';
+// the server-rendered landing is only for guests on the landing routes; anyone else would see it flash
+(function () { var p = (location.hash.slice(1) || '/').split('?')[0];
+  if (localStorage.getItem('token') || ['/', '/login', '/register'].indexOf(p) < 0) document.documentElement.classList.add('spa'); })();</script>
+{{LD}}
+</head>
+<body>
+<div id="app">{{SSR}}</div>
+<div id="toasts"></div>
+<script src="/static/i18n.js?v={{V}}"></script>
+<script src="/static/brands.js?v={{V}}"></script>
+<script src="/static/app.js?v={{V}}"></script>
+<script src="/static/landing.js?v={{V}}"></script>
+<script src="/static/fx.js?v={{V}}"></script>
+</body>
+</html>

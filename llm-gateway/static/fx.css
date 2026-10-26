@@ -1,0 +1,83 @@
+/* Motion & small interaction details. Kept deliberately quiet: short fades, no glows. */
+:root{--ease:cubic-bezier(.2,.7,.3,1);--ease-io:cubic-bezier(.65,0,.35,1);--spring:var(--ease);--t1:.12s;--t2:.2s;--t3:.3s;--t4:.5s}
+::selection{background:color-mix(in srgb,var(--accent) 28%,transparent);color:var(--tx)}
+*{scrollbar-width:thin;scrollbar-color:var(--s3) transparent}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--s3);border-radius:10px;border:3px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-track{background:transparent}
+
+/* entrance (used by fx.js on route change) */
+@keyframes fxIn{from{opacity:0;transform:translateY(4px)}}
+@keyframes fxRow{from{opacity:0}}
+@keyframes fadeIn{from{opacity:0}}
+@keyframes rise{from{opacity:0}}
+@keyframes pop{from{opacity:0}}
+.fx-in{animation:fxIn .25s var(--ease) both;animation-delay:calc(var(--i,0) * 20ms)}
+.fx-row{animation:fxRow .2s var(--ease) both}
+.fx-new td{animation:rowFlash 1.4s var(--ease) both}
+@keyframes rowFlash{0%{background:color-mix(in srgb,var(--accent) 12%,transparent)}100%{background:transparent}}
+.rise,.pop,.st-pub{animation:fadeIn .25s var(--ease) both}
+
+/* shell */
+.top.scrolled{border-bottom-color:var(--bd)}
+.nav-ind{display:none}
+.th-spin svg{animation:none}
+@media(max-width:900px){.side.open+.main::after{content:"";position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:25;animation:fadeIn .2s both}}
+
+/* KPI icon chips */
+.kpi{position:relative;overflow:hidden}
+.kpi-ic{position:absolute;top:14px;right:14px;width:28px;height:28px;border-radius:var(--r-sm);display:grid;place-items:center;color:var(--tx3);background:var(--s2);border:1px solid var(--bd)}
+.kpi-ic svg{width:15px;height:15px}
+.g6 .kpi-ic{width:24px;height:24px;top:12px;right:12px}.g6 .kpi-ic svg{width:13px;height:13px}
+.g4 .kpi .v{font-size:26px}
+
+/* buttons */
+.btn:active:not(:disabled){transform:translateY(1px)}
+.btn.copied{color:var(--ok)!important;border-color:color-mix(in srgb,var(--ok) 40%,transparent)!important}
+.fx-tip{position:fixed;z-index:300;transform:translate(-50%,-100%);margin-top:-8px;pointer-events:none;padding:3px 8px;border-radius:4px;font-size:12px;
+  background:var(--tx);color:var(--bg);animation:tip 1.2s var(--ease) forwards;white-space:nowrap}
+@keyframes tip{0%{opacity:0}12%,80%{opacity:1}100%{opacity:0}}
+.btn.oauth{background:var(--s1);border-color:var(--bd);font-weight:500}
+.btn.oauth:hover{background:var(--s2)}
+
+/* charts */
+.chart .ln{stroke-dasharray:1;animation:lineDraw .8s var(--ease) both}
+@keyframes lineDraw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+.chart .ar{animation:fadeIn .6s var(--ease) both}
+
+/* skeleton */
+.skel{position:relative;overflow:hidden;background:var(--s2);animation:none;border:1px solid var(--bd)}
+.skel::after{content:"";position:absolute;inset:0;transform:translateX(-100%);animation:skel 1.6s var(--ease-io) infinite;
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--tx) 5%,transparent),transparent)}
+@keyframes skel{to{transform:translateX(100%)}}
+
+/* overlays */
+.ov{background:rgba(20,19,16,.45);animation:fadeIn .15s both}
+.modal{animation:fxIn .18s var(--ease) both}
+.drawer{animation:drawerIn .2s var(--ease) both}
+@keyframes drawerIn{from{transform:translateX(24px);opacity:0}}
+.ov.closing{animation:fadeOut .12s forwards}
+@keyframes fadeOut{to{opacity:0}}
+
+/* toasts */
+.toast{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;cursor:pointer;color:var(--tx);min-width:240px;animation:fadeIn .15s both}
+.toast .t-ic{flex:none;width:18px;height:18px;display:grid;place-items:center;color:var(--accent)}
+.toast .t-ic svg{width:14px;height:14px;stroke-width:2.5}
+.toast.ok .t-ic{color:var(--ok)}.toast.err .t-ic{color:var(--err)}
+.toast .t-m{line-height:1.4}
+.toast{position:relative;overflow:hidden}
+.toast .t-bar{position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--tx3);opacity:.35;transform-origin:left;animation:toastBar 3.8s linear forwards}
+.toast:hover .t-bar{animation-play-state:paused}
+@keyframes toastBar{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+.toast.out{animation:fadeOut .15s forwards}
+
+/* admin login */
+.auth>.card{position:relative}
+
+/* language switch */
+.lang-sw{display:inline-flex;border:1px solid var(--bd);border-radius:var(--r-sm);overflow:hidden;flex:none}
+.lang-sw button{border:0;background:none;cursor:pointer;width:32px;height:26px;font:500 11.5px/1 var(--font);color:var(--tx3)}
+.lang-sw button+button{border-left:1px solid var(--bd)}
+.lang-sw button.on{color:var(--tx);background:var(--s2)}.lang-sw button:not(.on):hover{color:var(--tx)}
+.lang-fixed{position:absolute;top:16px;right:16px;z-index:5}
+
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
