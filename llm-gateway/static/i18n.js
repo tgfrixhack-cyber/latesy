@@ -862,6 +862,7 @@
 "Моделей в каталоге": "Models in catalog",
 "Вход, от": "Input, from",
 "Абонентская плата": "Monthly fee",
+"Потяните, чтобы повернуть": "Drag to rotate",
 "Цены": "Prices",
 "Цена указана за 1 млн токенов, отдельно для входа и выхода. Списываем по полю": "Prices are per 1M tokens, input and output listed separately. We charge by the",
 "из ответа модели, без округлений до тысяч.": "field of the model response, with no rounding to thousands.",
