@@ -21,7 +21,7 @@ from .models import now
 
 router = APIRouter(include_in_schema=False)
 STATIC = pathlib.Path(__file__).resolve().parent.parent / "static"
-ASSET_V = "26"  # ?v= suffix of /static assets on every page; bump after changing CSS/JS
+ASSET_V = "27"  # ?v= suffix of /static assets on every page; bump after changing CSS/JS
 # Self-hosted (static/fonts): no third-party requests; the two Onest files cover the first paint of Russian text.
 FONTS = ('<link rel="preload" href="/static/fonts/Onest-cyrillic.woff2" as="font" type="font/woff2" crossorigin>'
          '<link rel="preload" href="/static/fonts/Onest-latin.woff2" as="font" type="font/woff2" crossorigin>'
@@ -249,14 +249,13 @@ def landing_ssr(c: Ctx) -> str:
     prices = (f'<div class="tbl-wrap lp-pr">{price_table(c, top)}{more}</div>' if top else
               '<div class="tbl-wrap lp-pr"><div class="lp-empty">Каталог пока пуст. Модели появятся здесь, когда администратор их включит.</div></div>')
     return f'''<div class="lp lp-ssr">{header(c)}
-<section class="lp-hero" data-sec="top"><div class="lp-w">
+<section class="lp-hero" data-sec="top"><div class="lp-w"><div class="lp-hero-in"><div class="lp-hero-l">
 <h1 class="lp-h1 lp-brandh" data-noi18n>{e(c.site)} API</h1>
 <p class="lp-sig" aria-label="true ApiKey"><span class="lp-sig-k">true</span> ApiKey<i class="lp-caret" aria-hidden="true"></i></p>
-<div class="lp-hero-in"><div class="lp-hero-l">
 <p class="lp-lead">GPT, Claude, Gemini, DeepSeek и другие модели по одному OpenAI-совместимому ключу, с оплатой в рублях. Чтобы подключиться, замените адрес API в своём коде, Claude Code, Codex или Cursor. Баланс пополняется через СБП, картой или криптовалютой.</p>
 <div class="lp-cta"><a class="btn pri lg" href="/#/login">Получить ключ</a><a class="lp-more" href="/models">Посмотреть цены</a></div>
 <dl class="lp-facts">{"".join(f'<div><dt>{k}</dt><dd class="num">{v}</dd></div>' for k, v in facts)}</dl>
-</div><div class="lp-hero-r"></div></div></div></section>
+</div><div class="lp-hero-r"><div class="lp-obj" aria-hidden="true"></div><div class="lp-hero-v"></div></div></div></div></section>
 <div class="lp-brands"></div>
 <section class="lp-sec" data-sec="prices"><div class="lp-w"><div class="lp-sh"><span class="lp-n">01</span><div><h2>Цены</h2><p>{PRICES_NOTE}</p></div></div>{prices}</div></section>
 <section class="lp-sec" data-sec="faq"><div class="lp-w"><div class="lp-sh"><span class="lp-n">{faq_n:02d}</span><div><h2>Вопросы</h2></div></div>
