@@ -25,16 +25,19 @@ function landingPage(el, p, q, { login = false } = {}) {
     <div class="lp-act">${langSw()}<button class="btn sm icon ghost" id="lpTh" title="Тема">${ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon')}</button><button class="lp-in" data-login>Войти</button><button class="btn pri sm lp-key" data-login>Получить ключ</button></div>
   </div></header>
 
-  <section class="lp-hero" data-sec="top"><div class="lp-w">
-    <h1 class="lp-h1 lp-brandh" data-noi18n>${esc(cfg.site_name)} API</h1>
-    <p class="lp-sig" aria-label="true ApiKey"><span class="lp-sig-k">true</span> ApiKey<i class="lp-caret" aria-hidden="true"></i></p>
-    <div class="lp-hero-in"><div class="lp-hero-l">
+  <section class="lp-hero" data-sec="top"><div class="lp-w"><div class="lp-hero-in">
+    <div class="lp-hero-l">
+      <h1 class="lp-h1 lp-brandh" data-noi18n>${esc(cfg.site_name)} API</h1>
+      <p class="lp-sig" aria-label="true ApiKey"><span class="lp-sig-k">true</span> ApiKey<i class="lp-caret" aria-hidden="true"></i></p>
       <p class="lp-lead">GPT, Claude, Gemini, DeepSeek и другие модели по одному OpenAI-совместимому ключу, с оплатой в рублях. Чтобы подключиться, замените адрес API в своём коде, Claude Code, Codex или Cursor. Баланс пополняется через СБП, картой или криптовалютой.</p>
       <div class="lp-cta"><button class="btn pri lg" data-login>Получить ключ</button><a class="lp-more" href="#/" data-go="prices">Посмотреть цены</a></div>
       <dl class="lp-facts" id="lpFacts">${lpFacts(null)}</dl>
     </div>
-    <div class="lp-hero-r">${lpReq(host, null)}</div></div>
-  </div></section>
+    <div class="lp-hero-r">
+      <div class="lp-obj" id="lpObj" aria-hidden="true"><canvas></canvas><div class="logo lp-obj-fb">${LOGO}</div><span class="lp-obj-hint">Потяните, чтобы повернуть</span></div>
+      <div class="lp-hero-v">${lpReq(host, null)}</div>
+    </div>
+  </div></div></section>
   <div class="lp-brands" id="lpBrands"></div>
 
   <section class="lp-sec" data-sec="prices"><div class="lp-w">
@@ -112,6 +115,7 @@ function landingPage(el, p, q, { login = false } = {}) {
     let cur = ''; for (const s of secs) if (s.getBoundingClientRect().top < innerHeight * .35) cur = s.dataset.sec;
     links.forEach(a => a.classList.toggle('on', a.dataset.go === cur)); };
   addEventListener('scroll', onScroll, { passive: true }); onScroll();
+  LP.key3d?.destroy(); LP.key3d = window.Key3D ? Key3D.mount($('#lpObj')) : null; // the old one is gone after a language re-render
   lpTabs($('.lp-code', root));
   $('#lpQ').oninput = e => { LP.q = e.target.value.trim().toLowerCase(); lpPrices(); };
   LP.q = ''; LP.all = false; LP.models = null; LP.st = null;
@@ -134,7 +138,7 @@ async function lpLoadModels(host) {
   LP.models = ms.filter(m => m.kind !== 'embedding' || m.price_in > 0);
   const ex = LP.models.length ? lpPick(LP.models) : null;
   $('#lpFacts').innerHTML = lpFacts(LP.models);
-  $('.lp-hero-r').innerHTML = lpReq(host, ex);
+  $('.lp-hero-v').innerHTML = lpReq(host, ex);
   const br = lpBrands(LP.models), bx = $('#lpBrands'); bx.innerHTML = br; bx.hidden = !br;
   lpPrices(); lpVolUpd();
   if (LP.go) { const g = LP.go; LP.go = null; requestAnimationFrame(() => lpGo(g)); }
