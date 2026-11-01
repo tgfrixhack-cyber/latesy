@@ -61,7 +61,7 @@ import type { Spatial } from "./sound";
 import type { SpecMode, Store, UiState } from "./store";
 import { SWING_MS, createSwordModel, firstPersonMatrix, glintTime, setSwordStyle, swordStyle } from "./sword";
 import type { SwordStyle } from "./sword";
-import { createTextures, gridTexture, labelTexture, ringTexture, setLabelFont, setPixelFont } from "./textures";
+import { createTextures, gridTexture, itemTexture, labelTexture, ringTexture, setLabelFont, setPixelFont } from "./textures";
 
 /** Radians per mouse count at sensitivity 1×. */
 const MOUSE_SENS = 0.0023;
@@ -246,17 +246,33 @@ function createProjectile(kind: ProjKind) {
     m.castShadow = true;
     g.add(m);
   } else {
-    const snow = kind === "snowball";
-    const m = new THREE.Mesh(
-      new THREE.BoxGeometry(0.24, 0.24, 0.24),
-      new THREE.MeshLambertMaterial({ color: snow ? "#f8fafc" : "#1f7a70", emissive: snow ? "#334155" : "#0b3b36" }),
-    );
-    g.add(m);
+    // Like Minecraft: a thrown snowball or pearl is its item icon, always facing the camera.
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: itemTexture(kind), alphaTest: 0.5 }));
+    sprite.scale.setScalar(0.45);
+    g.add(sprite);
   }
   return g;
 }
 
 const GESTURES: Partial<Record<EmoteId, Gesture>> = { wave: "wave", point: "point" };
+
+/** Emote wheel (hold E): radius, the dead zone in its middle, and how long E must be held next to
+ *  the wardrobe before it opens (a tap there opens the wardrobe). */
+export const WHEEL_R = 120;
+const WHEEL_DEAD = 22;
+const WHEEL_HOLD_MS = 200;
+
+/** Direction of wheel sector `i` on screen (y down): the first one at the top, then clockwise. */
+export function emoteWheelAngle(i: number): number {
+  return -Math.PI / 2 + (i / EMOTE_IDS.length) * Math.PI * 2;
+}
+
+function wheelSector(dx: number, dy: number): number | null {
+  if (Math.hypot(dx, dy) < WHEEL_DEAD) return null;
+  const step = (Math.PI * 2) / EMOTE_IDS.length;
+  const a = Math.atan2(dy, dx) + Math.PI / 2;
+  return ((Math.round(a / step) % EMOTE_IDS.length) + EMOTE_IDS.length) % EMOTE_IDS.length;
+}
 
 function reelItems(target: BuffId, count = 26): BuffId[] {
   const list: BuffId[] = [];
@@ -398,6 +414,12 @@ export class Engine {
   private room: string | null = null;
   private token = "";
   private lastUseAt = 0;
+  /** Open emote wheel: its centre, the pointer's offset from it, the hovered sector; `shown` stays
+   *  false for the first moments next to the wardrobe. */
+  private wheel: { cx: number; cy: number; vx: number; vy: number; sel: number | null; shown: boolean; wardrobe: boolean } | null = null;
+  private wheelTimer = 0;
+  /** Where the (unlocked) cursor last was over the game view. */
+  private cursor = { x: 0, y: 0, seen: false };
   private keys = new Set<string>();
   private mouse = { left: false, right: false };
   private resize: ResizeObserver;
@@ -643,7 +665,8 @@ export class Engine {
   switchRoom(room: string | null) {
     if (!this.name) return;
     this.room = room;
-    this.store.set({ room: null, profileOpen: false, quickChat: false });
+    this.closeWheel(false);
+    this.store.set({ room: null, profileOpen: false });
     this.connect();
   }
 
@@ -660,11 +683,10 @@ export class Engine {
     if (item in THROW) this.swingAt = now;
   }
 
-  /** Quick chat; "point" marks the spot under the crosshair. */
-  emote(e: EmoteId) {
-    this.store.set({ quickChat: false });
+  /** Quick chat; "point" marks the spot under `at` on screen (the wheel's centre), else the crosshair. */
+  emote(e: EmoteId, screen: { x: number; y: number } | null = null) {
     if (e !== "point") return this.send({ t: "emote", e });
-    const { origin, dir } = this.eyeRay();
+    const { origin, dir } = screen ? this.screenRay(screen.x, screen.y) : this.eyeRay();
     const hit = raycastVoxels(this.world, origin, dir, 60);
     let at: THREE.Vector3;
     if (hit) at = new THREE.Vector3(hit.x + 0.5 + hit.nx * 0.5, hit.y + (hit.ny > 0 ? 1 : 0.5) + (hit.ny < 0 ? -0.5 : 0), hit.z + 0.5 + hit.nz * 0.5);
@@ -673,8 +695,72 @@ export class Engine {
     this.send({ t: "emote", e, x: Math.round(at.x * 100) / 100, y: Math.round(at.y * 100) / 100, z: Math.round(at.z * 100) / 100 });
   }
 
-  setQuickChat(open: boolean) {
-    this.store.set({ quickChat: open });
+  /** E pressed: the wheel opens where the cursor is (at the crosshair while the mouse is captured). */
+  private openWheel() {
+    const s = this.store.get();
+    const el = this.renderer.domElement;
+    const locked = document.pointerLockElement === el;
+    const r = el.getBoundingClientRect();
+    const fit = (v: number, size: number) => {
+      const m = Math.min(WHEEL_R + 8, size / 2);
+      return Math.max(m, Math.min(size - m, v));
+    };
+    const free = !locked && this.cursor.seen;
+    const cx = fit(free ? this.cursor.x : r.width / 2, r.width);
+    const cy = fit(free ? this.cursor.y : r.height / 2, r.height);
+    const wardrobe = s.view === "hub" && !s.watching && s.nearWardrobe && !this.inDuel();
+    const vx = free ? this.cursor.x - cx : 0;
+    const vy = free ? this.cursor.y - cy : 0;
+    this.wheel = { cx, cy, vx, vy, sel: wheelSector(vx, vy), shown: false, wardrobe };
+    this.mouse.left = this.mouse.right = false;
+    window.clearTimeout(this.wheelTimer);
+    if (wardrobe) this.wheelTimer = window.setTimeout(this.showWheel, WHEEL_HOLD_MS);
+    else this.showWheel();
+  }
+
+  private showWheel = () => {
+    const w = this.wheel;
+    if (!w) return;
+    w.shown = true;
+    this.store.set({ emoteWheel: { x: w.cx, y: w.cy, sel: w.sel } });
+  };
+
+  /** E released (`confirm`): the hovered emote goes out; a quick tap at the wardrobe opens it. */
+  private closeWheel(confirm: boolean) {
+    const w = this.wheel;
+    window.clearTimeout(this.wheelTimer);
+    if (!w) return;
+    this.wheel = null;
+    if (this.store.get().emoteWheel) this.store.set({ emoteWheel: null });
+    if (!confirm) return;
+    if (!w.shown) {
+      if (w.wardrobe) this.setWardrobe(true);
+    } else if (w.sel !== null) {
+      this.emote(EMOTE_IDS[w.sel], { x: w.cx, y: w.cy });
+    }
+  }
+
+  private moveWheel(dx: number, dy: number, absolute: boolean) {
+    const w = this.wheel;
+    if (!w) return;
+    if (absolute) {
+      w.vx = dx;
+      w.vy = dy;
+    } else {
+      w.vx += dx;
+      w.vy += dy;
+      // Kept within the ring, so turning to another sector takes a short move, not undoing a long one.
+      const len = Math.hypot(w.vx, w.vy);
+      const max = WHEEL_R * 0.7;
+      if (len > max) {
+        w.vx *= max / len;
+        w.vy *= max / len;
+      }
+    }
+    const sel = wheelSector(w.vx, w.vy);
+    if (sel === w.sel) return;
+    w.sel = sel;
+    if (w.shown) this.store.set({ emoteWheel: { x: w.cx, y: w.cy, sel } });
   }
 
   setProfile(open: boolean) {
@@ -757,6 +843,7 @@ export class Engine {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
     window.clearTimeout(this.lookTimer);
+    window.clearTimeout(this.wheelTimer);
     this.stopPing();
     this.resize.disconnect();
     const el = this.renderer.domElement;
@@ -833,8 +920,8 @@ export class Engine {
         duelTarget: null,
         nearWardrobe: false,
         profileOpen: false,
-        quickChat: false,
       });
+      this.closeWheel(false);
       this.clearWorldObjects();
       if (document.pointerLockElement) document.exitPointerLock();
     };
@@ -1386,6 +1473,7 @@ export class Engine {
     this.store.set(patch);
     const s = this.store.get();
     if (s.wardrobe || s.help || s.profileOpen) {
+      this.closeWheel(false);
       this.keys.clear();
       this.mouse.left = this.mouse.right = false;
       if (document.pointerLockElement) document.exitPointerLock();
@@ -1827,13 +1915,8 @@ export class Engine {
         this.setOverlay({ wardrobe: false, help: false, profileOpen: false });
         return;
       }
-      if (s.quickChat && !overlay) {
-        const n = /^Digit([1-6])$/.exec(e.code);
-        if (n) return this.emote(EMOTE_IDS[Number(n[1]) - 1]);
-        if (e.code === "Escape" || e.code === "KeyG") return this.setQuickChat(false);
-      } else if (e.code === "KeyG" && !overlay) {
-        return this.setQuickChat(true);
-      }
+      if (this.wheel && e.code === "Escape") return this.closeWheel(false);
+      if (e.code === "KeyE" && !overlay) return this.openWheel();
       if (e.code === "KeyH" && inHub) return this.setHelp(true);
       if (e.code === "KeyP" && inHub && !overlay) return this.setProfile(true);
       if ((e.code === "KeyY" || e.code === "KeyN") && s.invite && performance.now() - s.invite.at < INVITE_MS) {
@@ -1855,32 +1938,33 @@ export class Engine {
     if (e.code === "KeyQ" && mode === "play" && s.view === "arena") this.shoot();
     if (/^Digit[123]$/.test(e.code) && s.vote && !s.alive) this.vote(Number(e.code.slice(5)) - 1);
     if (/^Digit[1-5]$/.test(e.code) && mode === "play" && s.view === "arena" && s.alive) this.useItem(Number(e.code.slice(5)) - 1);
-    if (inHub) {
-      if (e.code === "KeyE" && s.nearWardrobe && !this.inDuel()) this.setWardrobe(true);
-      if (e.code === "KeyF" && s.duelTarget && !this.inDuel()) this.send({ t: "duel", id: s.duelTarget.id });
-    }
+    if (inHub && e.code === "KeyF" && s.duelTarget && !this.inDuel()) this.send({ t: "duel", id: s.duelTarget.id });
     if (mode === "spectate") {
       if (e.code === "KeyV") {
         const order: SpecMode[] = ["third", "first", "free"];
         this.specMode = order[(order.indexOf(this.specMode) + 1) % order.length];
         if (this.specMode === "free") this.specPos.copy(this.camera.position);
       }
-      if (e.code === "KeyE" || e.code === "ArrowRight") this.cycleTarget(1);
+      if (e.code === "ArrowRight") this.cycleTarget(1);
       if (e.code === "KeyQ" || e.code === "ArrowLeft") this.cycleTarget(-1);
     }
   };
 
   private onKeyUp = (e: KeyboardEvent) => {
     this.keys.delete(e.code);
+    if (e.code === "KeyE") this.closeWheel(true);
   };
 
   private onBlur = () => {
     this.keys.clear();
     this.mouse.left = this.mouse.right = false;
+    this.closeWheel(false);
   };
 
   private onMouseDown = (e: MouseEvent) => {
     sfx.unlock();
+    // The wheel takes the mouse: a left click picks, a right click cancels.
+    if (this.wheel) return this.closeWheel(e.button === 0);
     const mode = this.mode;
     const s = this.store.get();
     if (mode === "orbit" || s.wardrobe || s.help || s.profileOpen) return;
@@ -1957,7 +2041,20 @@ export class Engine {
   }
 
   private onMouseMove = (e: MouseEvent) => {
-    if (document.pointerLockElement !== this.renderer.domElement) return;
+    const el = this.renderer.domElement;
+    const locked = document.pointerLockElement === el;
+    if (!locked) {
+      const r = el.getBoundingClientRect();
+      this.cursor = { x: e.clientX - r.left, y: e.clientY - r.top, seen: true };
+    }
+    // While the wheel is open the mouse picks an emote instead of turning the view.
+    if (this.wheel) {
+      if (!locked) return this.moveWheel(this.cursor.x - this.wheel.cx, this.cursor.y - this.wheel.cy, true);
+      const d = this.readMouse(e);
+      if (d) this.moveWheel(d[0], d[1], false);
+      return;
+    }
+    if (!locked) return;
     const d = this.readMouse(e);
     if (!d) return;
     const k = MOUSE_SENS * this.sens;
@@ -1977,6 +2074,7 @@ export class Engine {
     // The first delta after locking may carry the cursor's jump to the centre: judge it on its own.
     this.mouseLast = { at: -1e9, mag: 0, dropped: 0 };
     if (!locked) this.mouse.left = this.mouse.right = false;
+    this.closeWheel(false);
   };
 
   private cycleTarget(dir: number) {
@@ -1988,6 +2086,14 @@ export class Engine {
   }
 
   // ------------------------------------------------------------------ actions
+
+  /** A ray from the camera through a point of the game view (px). */
+  private screenRay(x: number, y: number) {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2((x / r.width) * 2 - 1, 1 - (y / r.height) * 2), this.camera);
+    return { origin: ray.ray.origin.clone(), dir: ray.ray.direction.clone() };
+  }
 
   private eyeRay() {
     const origin = new THREE.Vector3(this.pos.x, this.pos.y + EYE_HEIGHT * this.mySize(), this.pos.z);
