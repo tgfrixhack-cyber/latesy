@@ -70,6 +70,28 @@ const PALETTES: Record<SwordKind, Record<string, string>> = {
   netherite: { o: "#171315", H: "#8a7f86", h: "#6b6067", b: "#4c4248", d: "#2a2327", g: "#3a3236", G: "#1a1618", ...HANDLE },
 };
 
+const iconUrls = new Map<SwordKind, string>();
+
+/** The sword's sprite as a data URL (touch attack button); draw it with image-rendering: pixelated. */
+export function swordIconUrl(kind: SwordKind): string {
+  let url = iconUrls.get(kind);
+  if (url) return url;
+  const c = document.createElement("canvas");
+  c.width = c.height = 16;
+  const ctx = c.getContext("2d")!;
+  const pal = PALETTES[kind];
+  SPRITE.forEach((row, y) =>
+    [...row].forEach((ch, x) => {
+      if (ch === ".") return;
+      ctx.fillStyle = pal[ch];
+      ctx.fillRect(x, y, 1, 1);
+    }),
+  );
+  url = c.toDataURL();
+  iconUrls.set(kind, url);
+  return url;
+}
+
 /** Each opaque pixel becomes a 1×1×1-pixel cube coloured like the pixel; faces between pixels are
  *  left out. */
 function swordGeometry(kind: SwordKind): THREE.BufferGeometry {
