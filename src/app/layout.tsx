@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Nunito } from "next/font/google";
 import "./globals.css";
 
@@ -11,6 +11,18 @@ export const metadata: Metadata = {
   title: "Блок-Арена — PvP онлайн",
   description:
     "Кубический PvP до последнего выжившего: до 12 игроков, круглая арена, новый баф каждые 2 минуты.",
+  appleWebApp: { capable: true, title: "Блок-Арена", statusBarStyle: "black-translucent" },
+};
+
+// A game on phones: no pinch or double-tap zoom, and drawn under the notch (the controls keep to
+// the safe area).
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",
+  themeColor: "#8fc8ff",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
