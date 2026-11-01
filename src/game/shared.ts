@@ -798,12 +798,13 @@ export interface WeeklyBoard {
 export type ItemId = "apple" | "pearl" | "shield" | "snowball" | "tnt";
 /** Order of the item bar (keys 1–5) and of `you.items`. */
 export const ITEM_IDS: ItemId[] = ["apple", "pearl", "shield", "snowball", "tnt"];
-export const ITEMS: Record<ItemId, { title: string; description: string; color: string; icon: string }> = {
-  apple: { title: "Золотое яблоко", description: "Лечит 4 сердца", color: "#facc15", icon: "🍎" },
-  pearl: { title: "Эндер-жемчуг", description: "Бросок — телепорт туда, где упадёт", color: "#2dd4bf", icon: "🔮" },
-  shield: { title: "Щит", description: "8 секунд блокирует следующий удар или выстрел", color: "#93c5fd", icon: "🛡️" },
-  snowball: { title: "Снежок", description: "Без урона, но сильно отталкивает", color: "#e0f2fe", icon: "❄️" },
-  tnt: { title: "TNT", description: "Бросок, взрыв через 2,5 секунды", color: "#ef4444", icon: "🧨" },
+/** Icons are pixel art on the client (textures.ts, itemIconUrl). */
+export const ITEMS: Record<ItemId, { title: string; description: string; color: string }> = {
+  apple: { title: "Золотое яблоко", description: "Лечит 4 сердца", color: "#facc15" },
+  pearl: { title: "Эндер-жемчуг", description: "Бросок — телепорт туда, где упадёт", color: "#2dd4bf" },
+  shield: { title: "Щит", description: "8 секунд блокирует следующий удар или выстрел", color: "#93c5fd" },
+  snowball: { title: "Снежок", description: "Без урона, но сильно отталкивает", color: "#e0f2fe" },
+  tnt: { title: "TNT", description: "Бросок, взрыв через 2,5 секунды", color: "#ef4444" },
 };
 export const ITEM_MAX = 8;
 export const APPLE_HEAL = 8;

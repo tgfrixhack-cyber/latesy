@@ -29,12 +29,12 @@ import {
   unlockText,
   unlocked,
 } from "@/game/shared";
-import type { BuffId, EmoteId, GameMode, PlayerInfo, ProfileInfo, SkinId, SwordKind, TrainStats } from "@/game/shared";
-import { Engine, SENS_MAX, SENS_MIN, loadToken, saveToken } from "@/game/client/engine";
+import type { BuffId, GameMode, PlayerInfo, ProfileInfo, SkinId, SwordKind, TrainStats } from "@/game/shared";
+import { Engine, SENS_MAX, SENS_MIN, WHEEL_R, emoteWheelAngle, loadToken, saveToken } from "@/game/client/engine";
 import { createStore, initialUi } from "@/game/client/store";
 import type { UiState } from "@/game/client/store";
 import { hairFor, skinFaceUrl } from "@/game/client/skins";
-import { dirtIconUrl } from "@/game/client/textures";
+import { dirtIconUrl, itemIconUrl } from "@/game/client/textures";
 import { sfx } from "@/game/client/sound";
 import "./pvp.css";
 
@@ -49,8 +49,6 @@ type EngineApi = {
   setSens(v: number): void;
   setLook(color: string, skin: SkinId, sword?: SwordKind): void;
   useItem(i: number): void;
-  emote(e: EmoteId): void;
-  setQuickChat(open: boolean): void;
   setProfile(open: boolean): void;
   setWardrobe(open: boolean): void;
   setHelp(open: boolean): void;
@@ -64,8 +62,6 @@ interface HudActions {
   setSens(v: number): void;
   setLook(color: string, skin: SkinId, sword?: SwordKind): void;
   switchRoom(room: string | null): void;
-  emote(e: EmoteId): void;
-  setQuickChat(open: boolean): void;
   setProfile(open: boolean): void;
   setWardrobe(open: boolean): void;
   setHelp(open: boolean): void;
@@ -118,11 +114,11 @@ const CONTROLS: [string, string][] = [
   ["Q", "выстрел (баф «Луки»)"],
   ["1–5", "предметы из сундуков"],
   ["1 / 2 / 3", "голос за баф (выбывшим)"],
-  ["G", "быстрый чат и эмоции"],
+  ["Зажать E", "колесо эмоций: наведи мышью, отпусти"],
   ["P", "профиль, задания, комнаты"],
   ["V", "вид от 1-го / 3-го лица"],
   ["T", "смотреть арену / в лобби"],
-  ["E", "гардероб"],
+  ["E у стойки", "гардероб (короткое нажатие)"],
   ["F", "вызвать на дуэль"],
   ["Y / N", "принять / отказать"],
   ["H", "помощь"],
@@ -611,7 +607,7 @@ function SpectatorBar({ ui, now, onVote }: { ui: UiState; now: number; onVote: (
           </div>
         )}
         <div className="mt-1 text-xs text-white/65">
-          <span className="pvp-key">V</span> режим · <span className="pvp-key">Q</span>/<span className="pvp-key">E</span> или ЛКМ/ПКМ — игрок ·{" "}
+          <span className="pvp-key">V</span> режим · ЛКМ/ПКМ или <span className="pvp-key">←</span>/<span className="pvp-key">→</span> — игрок ·{" "}
           <span className="pvp-key">WASD</span> <span className="pvp-key">Пробел</span>/<span className="pvp-key">Shift</span> — полёт
         </div>
       </Panel>
@@ -729,7 +725,8 @@ function ItemBar({ ui, now }: { ui: UiState; now: number }) {
         return (
           <div key={id} className={`pvp-slot pvp-item relative ${n > 0 || shield ? "" : "opacity-35"}`} title={`${ITEMS[id].title}: ${ITEMS[id].description}`}>
             <span className="absolute left-1 top-0.5 text-[10px] text-white/70">{i + 1}</span>
-            <span className="text-2xl leading-none">{ITEMS[id].icon}</span>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={itemIconUrl(id)} alt={ITEMS[id].title} className="h-8 w-8 [image-rendering:pixelated]" />
             {n > 0 && <span className="pvp-outline absolute bottom-0 right-1 text-sm tabular-nums">{n}</span>}
             {shield && <span className="absolute inset-x-0 bottom-0 h-1 bg-[#93c5fd]" style={{ width: `${Math.max(0, (ui.shieldUntil - now) / SHIELD_MS) * 100}%` }} />}
           </div>
@@ -739,24 +736,29 @@ function ItemBar({ ui, now }: { ui: UiState; now: number }) {
   );
 }
 
-function QuickChat({ onEmote, onClose }: { onEmote: (e: EmoteId) => void; onClose: () => void }) {
+/** Emote wheel while E is held: opens where the cursor was, the mouse picks a sector. */
+function EmoteWheel({ w }: { w: NonNullable<UiState["emoteWheel"]> }) {
+  const sel = w.sel === null ? null : EMOTE_IDS[w.sel];
+  const item = WHEEL_R * 0.68;
   return (
-    <div className="pointer-events-auto absolute bottom-28 left-3 w-52">
-      <Panel className="!p-2 text-sm">
-        <div className="mb-1 flex items-center justify-between text-xs text-white/70">
-          <span>Быстрый чат</span>
-          <button type="button" onClick={onClose} aria-label="Закрыть">
-            <span className="pvp-key">G</span>
-          </button>
-        </div>
-        {EMOTE_IDS.map((e, i) => (
-          <button key={e} type="button" onClick={() => onEmote(e)} className="flex w-full items-center gap-2 px-1 py-0.5 text-left hover:bg-white/10">
-            <span className="pvp-key">{i + 1}</span>
-            <span>{EMOTES[e].icon}</span>
-            <span>{EMOTES[e].label}</span>
-          </button>
-        ))}
-      </Panel>
+    <div className="pvp-wheel pointer-events-none absolute" style={{ left: w.x, top: w.y }}>
+      <div className="pvp-wheel-ring" style={{ width: WHEEL_R * 2, height: WHEEL_R * 2 }} />
+      {w.sel !== null && <div className="pvp-wheel-arrow" style={{ transform: `rotate(${emoteWheelAngle(w.sel)}rad)` }} />}
+      {EMOTE_IDS.map((e, i) => {
+        const a = emoteWheelAngle(i);
+        const on = w.sel === i;
+        return (
+          <div
+            key={e}
+            className={`pvp-wheel-item ${on ? "pvp-wheel-on" : ""}`}
+            style={{ transform: `translate(-50%, -50%) translate(${Math.cos(a) * item}px, ${Math.sin(a) * item}px) scale(${on ? 1.18 : 1})` }}
+          >
+            <span className="text-3xl leading-none">{EMOTES[e].icon}</span>
+            <span className="pvp-outline text-xs">{EMOTES[e].label}</span>
+          </div>
+        );
+      })}
+      <div className="pvp-wheel-center pvp-outline">{sel ? EMOTES[sel].text : "отпусти E"}</div>
     </div>
   );
 }
@@ -1292,7 +1294,7 @@ const HELP_ITEMS: [string, string][] = [
   ["Боты", `Если людей меньше ${BOT_FILL}, раунд добирают боты 🤖 — играть можно и одному. Победа над одними ботами даёт половину опыта.`],
   ["Прогресс", "Опыт за раунды, уровни, ежедневные задания и таблица недели — клавиша P. Новые скины и мечи открываются за победы и уровни. Прогресс привязан к этому браузеру, а не к нику."],
   ["Комнаты", "В профиле (P) создай приватную комнату и отправь друзьям ссылку или код из 5 символов."],
-  ["Быстрый чат", "G и цифра: gg, ха-ха, помахать, показать на точку под прицелом и другие."],
+  ["Эмоции", "Зажми E — появится колесо там, где курсор (с захваченной мышью — у прицела). Наведи мышью на эмоцию и отпусти E: gg, ха-ха, помахать, показать (метка там, где нажата E), спасибо, упс. Esc или ПКМ — отмена."],
   ["Зелёный круг у портала", "Встань в него: когда в круге больше половины игроков, раунд начнётся через 10 с. Иначе старт через 60 с после того, как в лобби двое."],
   ["Цветные площадки", "Голосование за режим. Встань на площадку — режим с наибольшим числом голосов сыграют в раунде."],
   ["Спринт", "Дважды быстро нажми W, как в Minecraft. Бег быстрее на 30%, с прыжками ещё быстрее. Спринт сбивается, если отпустить W, врезаться в стену или ударить. Удар с разбега отбрасывает сильнее, но не критует."],
@@ -1370,7 +1372,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
   const overlay = ui.wardrobe || ui.help || ui.profileOpen;
   const duelActive = ui.duel?.state === "countdown" || ui.duel?.state === "fight";
   const showCrosshair = !overlay && (arena ? inRound && ui.alive && !ui.watching : true);
-  const showLockHint = !ui.locked && !overlay && (arena ? inRound && !(spectating && ui.vote) : true);
+  const showLockHint = !ui.locked && !overlay && !ui.emoteWheel && (arena ? inRound && !(spectating && ui.vote) : true);
   return (
     <>
       {ui.hurtKey > 0 && <div key={ui.hurtKey} className="pvp-hurt pointer-events-none absolute inset-0" />}
@@ -1385,7 +1387,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
             <HubActivity ui={ui} now={now} />
           </div>
           <div className="pointer-events-none absolute left-3 top-3 bg-black/45 px-2 py-1 text-sm">
-            <span className="pvp-key">H</span> помощь · <span className="pvp-key">P</span> профиль{ui.profile ? ` (ур. ${ui.profile.level})` : ""} · <span className="pvp-key">G</span> чат
+            <span className="pvp-key">H</span> помощь · <span className="pvp-key">P</span> профиль{ui.profile ? ` (ур. ${ui.profile.level})` : ""} · зажми <span className="pvp-key">E</span> — эмоции
           </div>
           {ui.room && <RoomBadge room={ui.room} onLeave={() => actions.switchRoom(null)} />}
           {ui.reward && ui.phase === "lobby" && now - ui.reward.at < ui.timings.endMs + 9000 && (
@@ -1490,7 +1492,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
       </button>
 
       <ChatLog ui={ui} now={now} />
-      {ui.quickChat && !overlay && <QuickChat onEmote={actions.emote} onClose={() => actions.setQuickChat(false)} />}
+      {ui.emoteWheel && <EmoteWheel w={ui.emoteWheel} />}
       {arena && ui.phase === "ended" && <EndScreen ui={ui} now={now} />}
       {ui.wardrobe && <Wardrobe look={ui.look} myId={ui.myId} profile={ui.profile} onLook={actions.setLook} onClose={() => actions.setWardrobe(false)} />}
       {ui.profileOpen && <ProfileOverlay ui={ui} actions={actions} />}
@@ -1521,8 +1523,6 @@ export default function PvpGame() {
     setSens: (v) => api()?.setSens(v),
     setLook: (color, skin, sword) => api()?.setLook(color, skin, sword),
     switchRoom: (room) => api()?.switchRoom(room),
-    emote: (e) => api()?.emote(e),
-    setQuickChat: (open) => api()?.setQuickChat(open),
     setProfile: (open) => api()?.setProfile(open),
     setWardrobe: (open) => api()?.setWardrobe(open),
     setHelp: (open) => api()?.setHelp(open),
