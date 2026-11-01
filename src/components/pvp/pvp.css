@@ -1,0 +1,641 @@
+.pvp-root {
+  font-family: var(--font-nunito), sans-serif;
+  font-weight: 700;
+  cursor: default;
+}
+
+.pvp-title,
+.pvp-btn,
+.pvp-announce {
+  font-family: var(--font-pixel), monospace;
+  font-weight: 400;
+  line-height: 1.25;
+}
+
+.pvp-root canvas {
+  cursor: crosshair;
+}
+
+.pvp-panel {
+  background: rgba(20, 20, 24, 0.78);
+  border: 3px solid #000;
+  box-shadow:
+    inset 3px 3px 0 rgba(255, 255, 255, 0.14),
+    inset -3px -3px 0 rgba(0, 0, 0, 0.45);
+  padding: 1.25rem 1.5rem;
+}
+
+.pvp-panel-solid {
+  background: rgba(20, 20, 24, 0.96);
+}
+
+.pvp-title,
+.pvp-outline {
+  text-shadow: 3px 3px 0 rgba(0, 0, 0, 0.75);
+}
+
+.pvp-btn {
+  border: 3px solid #000;
+  padding: 0.7rem 1.4rem;
+  font-size: 0.85rem;
+  color: #fff;
+  text-shadow: 2px 2px 0 rgba(0, 0, 0, 0.6);
+  box-shadow:
+    inset -3px -4px 0 rgba(0, 0, 0, 0.35),
+    inset 3px 3px 0 rgba(255, 255, 255, 0.25);
+  transition: filter 0.1s, transform 0.05s;
+  cursor: pointer;
+}
+.pvp-btn:hover {
+  filter: brightness(1.15);
+}
+.pvp-btn:active {
+  transform: translateY(1px);
+}
+.pvp-btn-stone {
+  background: #6f6f6f;
+}
+.pvp-btn-green {
+  background: #3c8527;
+}
+.pvp-btn-red {
+  background: #a83232;
+}
+
+.pvp-input {
+  background: #000;
+  border: 3px solid #a0a0a0;
+  padding: 0.5rem 0.75rem;
+  font-size: 1.1rem;
+  color: #fff;
+  outline: none;
+}
+.pvp-input:focus {
+  border-color: #fff;
+}
+
+.pvp-key {
+  display: inline-block;
+  min-width: 1.4em;
+  padding: 0 0.35em;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  background: rgba(0, 0, 0, 0.35);
+  text-align: center;
+  font-size: 0.85em;
+}
+
+.pvp-badge {
+  border: 2px solid;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.1rem 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.pvp-slot {
+  background: rgba(0, 0, 0, 0.5);
+  border: 3px solid #000;
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.2);
+  padding: 0.3rem 0.8rem 0.3rem 0.4rem;
+}
+
+.pvp-crosshair {
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  background:
+    linear-gradient(#fff, #fff) center / 2px 100% no-repeat,
+    linear-gradient(#fff, #fff) center / 100% 2px no-repeat;
+  mix-blend-mode: difference;
+}
+
+.pvp-hurt {
+  box-shadow: inset 0 0 140px 50px rgba(220, 0, 0, 0.6);
+  animation: pvp-fade 0.45s ease-out forwards;
+}
+
+.pvp-arrow-flash {
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.28) 0%, rgba(255, 60, 60, 0.5) 100%);
+  animation: pvp-fade 0.4s ease-out forwards;
+}
+
+.pvp-lava {
+  box-shadow: inset 0 0 160px 30px rgba(255, 110, 0, 0.35);
+  animation: pvp-pulse 1.4s ease-in-out infinite;
+}
+
+.pvp-pulse {
+  animation: pvp-pulse 1s ease-in-out infinite;
+}
+
+.pvp-feed {
+  animation: pvp-slide 0.25s ease-out;
+}
+
+/* Buff announcement: ~4 s, ends invisible. */
+.pvp-flash {
+  animation: pvp-fade 1.6s ease-out forwards;
+}
+.pvp-announce {
+  animation: pvp-announce 4s cubic-bezier(0.2, 0.9, 0.3, 1) forwards;
+}
+.pvp-shake {
+  animation: pvp-shake 0.5s 0.35s linear;
+}
+.pvp-sub {
+  animation: pvp-sub 4s ease-out forwards;
+}
+.pvp-count {
+  animation: pvp-count 1s ease-out forwards;
+}
+.pvp-announce-in {
+  animation: pvp-pop 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.4);
+}
+
+@keyframes pvp-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes pvp-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes pvp-slide {
+  from {
+    transform: translateX(20px);
+    opacity: 0;
+  }
+}
+
+@keyframes pvp-announce {
+  0% {
+    transform: scale(3);
+    opacity: 0;
+    filter: blur(14px);
+    letter-spacing: 0.5em;
+  }
+  9% {
+    transform: scale(1);
+    opacity: 1;
+    filter: blur(0);
+    letter-spacing: 0.06em;
+  }
+  13% {
+    transform: scale(1.12);
+  }
+  18% {
+    transform: scale(1);
+  }
+  82% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.9) translateY(-24px);
+    opacity: 0;
+  }
+}
+
+@keyframes pvp-shake {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  20% {
+    transform: translate(-8px, 4px) rotate(-1deg);
+  }
+  40% {
+    transform: translate(7px, -5px) rotate(1deg);
+  }
+  60% {
+    transform: translate(-5px, 3px);
+  }
+  80% {
+    transform: translate(4px, -2px);
+  }
+}
+
+@keyframes pvp-sub {
+  0%,
+  10% {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  20% {
+    opacity: 1;
+    transform: none;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes pvp-count {
+  0% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+  20% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+}
+
+@keyframes pvp-pop {
+  from {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+}
+
+/* Hub: hint toast, training stats, wardrobe */
+.pvp-toast {
+  animation: pvp-toast 3s ease-out forwards;
+}
+@keyframes pvp-toast {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  8% {
+    opacity: 1;
+    transform: none;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.pvp-train {
+  background: rgba(20, 20, 24, 0.55);
+  border: 2px solid rgba(0, 0, 0, 0.8);
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.1);
+}
+
+.pvp-swatch {
+  height: 2.5rem;
+  border: 3px solid #000;
+  box-shadow:
+    inset 2px 2px 0 rgba(255, 255, 255, 0.3),
+    inset -2px -2px 0 rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: filter 0.1s;
+}
+.pvp-swatch:hover {
+  filter: brightness(1.15);
+}
+.pvp-swatch-on {
+  outline: 3px solid #fff;
+  outline-offset: 1px;
+}
+
+.pvp-chip {
+  border: 3px solid #000;
+  background: #4a4a4a;
+  padding: 0.5rem 0.4rem;
+  font-size: 0.95rem;
+  box-shadow:
+    inset -2px -3px 0 rgba(0, 0, 0, 0.35),
+    inset 2px 2px 0 rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  transition: filter 0.1s;
+}
+.pvp-chip:hover {
+  filter: brightness(1.15);
+}
+.pvp-skin-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+}
+.pvp-skin-face {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  background-size: 100% 100%;
+  image-rendering: pixelated;
+  border: 2px solid #000;
+}
+.pvp-chip-on {
+  background: #6b5a1a;
+  color: #ffde59;
+  outline: 3px solid #ffde59;
+  outline-offset: 1px;
+}
+
+/* Buff roulette */
+.pvp-reel {
+  position: relative;
+  width: min(440px, 86vw);
+  overflow: hidden;
+  background: rgba(15, 15, 20, 0.85);
+  border: 3px solid #000;
+  box-shadow:
+    inset 3px 3px 0 rgba(255, 255, 255, 0.14),
+    inset -3px -3px 0 rgba(0, 0, 0, 0.45);
+}
+.pvp-reel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(rgba(15, 15, 20, 0.95), transparent 38%, transparent 62%, rgba(15, 15, 20, 0.95));
+}
+.pvp-reel::after {
+  content: "";
+  position: absolute;
+  inset: 33.33% 0;
+  z-index: 2;
+  border-block: 3px solid #ffde59;
+}
+.pvp-reel-landed {
+  animation: pvp-reel-land 0.45s ease-out;
+}
+.pvp-reel-landed::after {
+  background: rgba(255, 222, 89, 0.18);
+}
+
+.pvp-death {
+  background: radial-gradient(circle at center, transparent 30%, rgba(120, 0, 0, 0.55) 100%);
+  animation: pvp-death 3.2s ease-out forwards;
+}
+
+.pvp-heart-shake {
+  animation: pvp-heart-shake 0.35s linear;
+}
+
+.pvp-mute {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: rgba(0, 0, 0, 0.5);
+  border: 2px solid #000;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+}
+
+@keyframes pvp-reel-land {
+  from {
+    transform: scale(1.12);
+  }
+}
+
+@keyframes pvp-death {
+  0% {
+    opacity: 0;
+  }
+  10%,
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes pvp-heart-shake {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(-3px, 1px);
+  }
+  50% {
+    transform: translate(3px, -1px);
+  }
+  75% {
+    transform: translate(-2px, 0);
+  }
+}
+
+/* globals.css cuts every animation to ~0 under reduced motion, which would leave these overlays
+   at their final (invisible) keyframe; show them statically instead — their lifetime is timed in JS. */
+@media (prefers-reduced-motion: reduce) {
+  .pvp-announce,
+  .pvp-sub,
+  .pvp-count,
+  .pvp-toast,
+  .pvp-death {
+    animation: none !important;
+  }
+  .pvp-flash,
+  .pvp-hurt,
+  .pvp-arrow-flash {
+    display: none;
+  }
+}
+
+/* Extra health (giants, vampire kills): golden hearts. */
+.pvp-heart-gold svg rect[fill="#e11d48"] {
+  fill: #fbbf24;
+}
+
+/* Item bar: square slots next to the dirt slot. */
+.pvp-item {
+  display: flex;
+  width: 3.1rem;
+  height: 3.1rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* Emote wheel (hold E): centred on the point it was opened at. */
+.pvp-wheel {
+  width: 0;
+  height: 0;
+  z-index: 20;
+}
+
+.pvp-wheel-ring {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 3px solid rgba(0, 0, 0, 0.75);
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.35) 0 34px, rgba(12, 14, 20, 0.72) 35px);
+  backdrop-filter: blur(3px);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+  animation: pvp-wheel-in 0.12s ease-out;
+}
+
+.pvp-wheel-item {
+  position: absolute;
+  display: flex;
+  width: 70px;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 2px 3px;
+  border: 2px solid transparent;
+  color: rgba(255, 255, 255, 0.85);
+  transition: transform 80ms ease-out;
+}
+
+.pvp-wheel-on {
+  border-color: #ffde59;
+  background: rgba(255, 222, 89, 0.22);
+  color: #ffde59;
+}
+
+/* Points from the middle towards the hovered sector. */
+.pvp-wheel-arrow {
+  position: absolute;
+  left: 0;
+  top: -3px;
+  width: 44px;
+  height: 6px;
+  transform-origin: 0 50%;
+  background: linear-gradient(90deg, transparent 0 18px, #ffde59 18px);
+}
+
+.pvp-wheel-center {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  max-width: 64px;
+  font-size: 0.75rem;
+  line-height: 1.1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+@keyframes pvp-wheel-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+}
+
+/* ---------------------------------------------------------------- touch controls */
+
+/* No browser gestures over the game: no scrolling, pinch zoom, double-tap zoom or long-press menus. */
+.pvp-root {
+  touch-action: none;
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
+}
+
+html:has(.pvp-root),
+html:has(.pvp-root) body {
+  overscroll-behavior: none;
+}
+
+.pvp-touch {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Resting where the left thumb lands; jumps under the finger while held. */
+.pvp-stick {
+  position: absolute;
+  left: calc(env(safe-area-inset-left, 0px) + 34px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 30px);
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  background: rgba(0, 0, 0, 0.18);
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.pvp-stick-on {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.28);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.pvp-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 50px;
+  height: 50px;
+  margin: -25px 0 0 -25px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  border: 2px solid rgba(0, 0, 0, 0.45);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+/* Pushed to the rim forward: sprinting. */
+.pvp-knob-sprint {
+  background: rgba(255, 222, 89, 0.85);
+}
+
+.pvp-tbtn {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.36);
+  border: 2px solid rgba(255, 255, 255, 0.42);
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.3);
+  color: #fff;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: transform 60ms ease-out, background 60ms;
+}
+
+.pvp-tbtn-main {
+  background: rgba(0, 0, 0, 0.42);
+  border-width: 3px;
+}
+
+.pvp-tbtn-on {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: #ffde59;
+  transform: scale(0.93);
+}
+
+/* Count on a button (dirt, arrows). */
+.pvp-tbadge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 22px;
+  padding: 0 4px;
+  border: 2px solid #000;
+  background: #2b2b2b;
+  font-size: 0.8rem;
+  line-height: 18px;
+  text-align: center;
+  text-shadow: 1px 1px 0 #000;
+}
+
+/* Small buttons along the top-right edge. */
+.pvp-tutil {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  right: calc(env(safe-area-inset-right, 0px) + 8px);
+  display: flex;
+  gap: 6px;
+}
