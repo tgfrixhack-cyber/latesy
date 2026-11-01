@@ -862,9 +862,9 @@ export class PvpServer {
     let name = sanitizeName(m.name) || `Игрок${c.id}`;
     const taken = new Set(this.named().map((p) => p.name.toLowerCase()));
     // A name reserved by someone else's progress gets a suffix, like one already in the game.
-    const reserved = !this.profiles.claimName(c.profileId, name);
+    const reserved = !this.profiles.nameFree(c.profileId, name);
     if (taken.has(name.toLowerCase()) || reserved) name = `${name.slice(0, 13)}#${c.id}`;
-    if (reserved) this.profiles.claimName(c.profileId, name);
+    this.profiles.claimName(c.profileId, name);
     c.name = name;
     if (typeof m.color === "string" && PLAYER_COLORS.includes(m.color)) {
       c.color = m.color;
