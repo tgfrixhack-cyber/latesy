@@ -4,11 +4,13 @@
 //   node server/index.ts --game-only   — only the game server, e.g. when the site is a static export
 // Env: PORT (default 3000), PVP_TIME_SCALE (e.g. 0.1 makes buffs every 6 s for testing),
 //      PVP_MODE / PVP_BUFFS (testing: fixed round mode, comma-separated buff order),
+//      PVP_BOTS (rounds topped up with bots to this many players, 0: off), PVP_MAX_ROOMS,
+//      PVP_RECORDS_FILE / PVP_PROFILES_FILE,
 //      anticheat limits PVP_AC_* / PVP_MAX_* / PVP_ALLOWED_ORIGINS / PVP_CLIENT_IP_HEADER (see README).
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import next from "next";
-import { PvpServer } from "./game.ts";
+import { Rooms } from "./rooms.ts";
 import { BUFF_IDS, MODE_IDS } from "../src/game/shared.ts";
 import type { BuffId, GameMode } from "../src/game/shared.ts";
 
@@ -21,7 +23,7 @@ const timeScale = Number(process.env.PVP_TIME_SCALE) || 1;
 
 const mode = MODE_IDS.find((m) => m === process.env.PVP_MODE) as GameMode | undefined;
 const buffPlan = process.env.PVP_BUFFS ? (process.env.PVP_BUFFS.split(",").filter((b) => BUFF_IDS.includes(b as BuffId)) as BuffId[]) : undefined;
-const game = new PvpServer({ timeScale, mode, buffPlan });
+const game = new Rooms({ timeScale, mode, buffPlan });
 if (dev) console.warn("> Development mode compiles pages on the fly and makes the game lag: run `npm run build && npm start` for players.");
 
 async function main() {

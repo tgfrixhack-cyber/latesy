@@ -5,6 +5,8 @@ export const WS_PATH = "/game-ws";
 
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 12;
+/** With fewer people than this, rounds are topped up with bots (and one person can start one). */
+export const BOT_FILL = 4;
 
 export const ARENA_RADIUS = 48;
 export const FINAL_RING_RADIUS = 12;
@@ -37,7 +39,7 @@ export const HOT_STREAK = 3;
 export const TICK_MS = 50;
 
 /** Bumped whenever the wire format changes; outdated clients are asked to reload. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /** WebSocket close codes the server uses to explain why it dropped a client. */
 export const CLOSE_OUTDATED = 4000;
@@ -45,6 +47,9 @@ export const CLOSE_KICKED = 4001;
 export const CLOSE_TOO_MANY = 4002;
 export const CLOSE_BANNED = 4003;
 export const CLOSE_FULL = 4004;
+/** Private room: no room with that code (or it closed), or too many rooms already. */
+export const CLOSE_NO_ROOM = 4005;
+export const CLOSE_ROOMS_FULL = 4006;
 
 // Player physics. The client simulates it; the server re-checks every reported move against it.
 export const WALK_SPEED = 5;
@@ -424,9 +429,10 @@ export class Voxels {
   }
 }
 
-/** Block types (the value stored in Voxels). Players only ever place dirt. */
-export const BLOCK = { dirt: 1, stone: 2, planks: 3, gold: 4, obsidian: 5, bricks: 6, bone: 7, snow: 8 } as const;
-export const BLOCK_TYPES = 8;
+/** Block types (the value stored in Voxels). Players only ever place dirt; the rest comes from the
+ *  hub layout and the arena's generated terrain. */
+export const BLOCK = { dirt: 1, stone: 2, planks: 3, gold: 4, obsidian: 5, bricks: 6, bone: 7, snow: 8, log: 9, leaves: 10, grass: 11 } as const;
+export const BLOCK_TYPES = 11;
 
 export interface Vec3 {
   x: number;
@@ -673,15 +679,170 @@ export function segmentClear(world: Voxels, a: Vec3, b: Vec3, tx: number, ty: nu
   return true;
 }
 
-export type SkinId = "steve" | "skeleton" | "zombie" | "knight" | "ninja" | "robot";
-export const SKIN_IDS: SkinId[] = ["steve", "skeleton", "zombie", "knight", "ninja", "robot"];
-export const SKINS: Record<SkinId, { title: string }> = {
+export type SkinId = "steve" | "skeleton" | "zombie" | "knight" | "ninja" | "robot" | "goldknight" | "shadow" | "mech";
+export const SKIN_IDS: SkinId[] = ["steve", "skeleton", "zombie", "knight", "ninja", "robot", "goldknight", "shadow", "mech"];
+/** What it takes to wear a skin: round wins or a level (progress is tied to the browser's token). */
+export interface Unlock {
+  wins?: number;
+  level?: number;
+}
+export const SKINS: Record<SkinId, { title: string; unlock?: Unlock }> = {
   steve: { title: "Стив" },
   skeleton: { title: "Скелет" },
   zombie: { title: "Зомби" },
   knight: { title: "Рыцарь" },
   ninja: { title: "Ниндзя" },
   robot: { title: "Робот" },
+  shadow: { title: "Тень", unlock: { level: 5 } },
+  goldknight: { title: "Золотой рыцарь", unlock: { wins: 5 } },
+  mech: { title: "Мех", unlock: { wins: 15 } },
+};
+/** Unlockable skins are recoloured versions of a base one (same model extras: plume, antenna…). */
+export const SKIN_BASE: Record<SkinId, SkinId> = {
+  steve: "steve",
+  skeleton: "skeleton",
+  zombie: "zombie",
+  knight: "knight",
+  ninja: "ninja",
+  robot: "robot",
+  goldknight: "knight",
+  shadow: "ninja",
+  mech: "robot",
+};
+
+export type SwordKind = "wood" | "stone" | "iron" | "gold" | "diamond" | "netherite";
+export const SWORD_KINDS: SwordKind[] = ["wood", "stone", "iron", "gold", "diamond", "netherite"];
+export const SWORDS: Record<SwordKind, { title: string; unlock?: Unlock }> = {
+  wood: { title: "Деревянный" },
+  stone: { title: "Каменный" },
+  iron: { title: "Железный", unlock: { wins: 1 } },
+  gold: { title: "Золотой", unlock: { wins: 3 } },
+  diamond: { title: "Алмазный", unlock: { wins: 10 } },
+  netherite: { title: "Незеритовый", unlock: { wins: 25 } },
+};
+
+export const unlocked = (u: Unlock | undefined, p: { wins: number; level: number }) => !u || ((u.wins ?? 0) <= p.wins && (u.level ?? 0) <= p.level);
+export const unlockText = (u: Unlock | undefined) =>
+  !u ? "" : [u.wins ? `${u.wins} ${u.wins === 1 ? "победа" : u.wins < 5 ? "победы" : "побед"}` : "", u.level ? `${u.level} уровень` : ""].filter(Boolean).join(" и ");
+
+// ---------------------------------------------------------------- progress
+
+/** XP needed to go from `level` to the next one. */
+export const xpToNext = (level: number) => 100 + (level - 1) * 50;
+
+/** Level and progress within it for a total amount of XP. */
+export function levelOf(xp: number): { level: number; into: number; next: number } {
+  let level = 1;
+  let rest = Math.max(0, Math.floor(xp));
+  while (rest >= xpToNext(level)) {
+    rest -= xpToNext(level);
+    level++;
+  }
+  return { level, into: rest, next: xpToNext(level) };
+}
+
+/** XP for one round: taking part, kills, knock-offs, placing and winning. */
+export const XP = { round: 20, kill: 10, win: 50, top3: 15, chest: 3 };
+
+export type QuestId = "knockoff" | "kills" | "win" | "rounds" | "chests" | "damage" | "items" | "crits";
+export interface QuestDef {
+  /** `{n}` is replaced by the target. */
+  title: string;
+  targets: number[];
+  xp: number;
+}
+export const QUESTS: Record<QuestId, QuestDef> = {
+  knockoff: { title: "Сбрось {n} игроков с края", targets: [2, 3], xp: 60 },
+  kills: { title: "Убей {n} соперников", targets: [3, 5], xp: 50 },
+  win: { title: "Выиграй раунд", targets: [1], xp: 80 },
+  rounds: { title: "Сыграй {n} раунда", targets: [3, 4], xp: 40 },
+  chests: { title: "Открой {n} сундуков", targets: [4, 6], xp: 40 },
+  damage: { title: "Нанеси {n} урона", targets: [60, 100], xp: 40 },
+  items: { title: "Используй {n} предметов", targets: [4, 6], xp: 40 },
+  crits: { title: "Сделай {n} критов", targets: [5, 8], xp: 40 },
+};
+export const QUEST_IDS = Object.keys(QUESTS) as QuestId[];
+export const DAILY_QUESTS = 3;
+
+export interface QuestInfo {
+  id: QuestId;
+  title: string;
+  progress: number;
+  target: number;
+  xp: number;
+  done: boolean;
+}
+
+export interface ProfileInfo {
+  level: number;
+  xp: number;
+  /** XP into the current level and the size of the level. */
+  into: number;
+  next: number;
+  wins: number;
+  rounds: number;
+  kills: number;
+  /** Moscow day of the quests. */
+  day: string;
+  quests: QuestInfo[];
+}
+
+/** This week's (Moscow, from Monday) best players by XP earned. */
+export interface WeeklyBoard {
+  week: string;
+  rows: { name: string; xp: number; wins: number; kills: number; level: number }[];
+}
+
+// ---------------------------------------------------------------- items
+
+export type ItemId = "apple" | "pearl" | "shield" | "snowball" | "tnt";
+/** Order of the item bar (keys 1–5) and of `you.items`. */
+export const ITEM_IDS: ItemId[] = ["apple", "pearl", "shield", "snowball", "tnt"];
+export const ITEMS: Record<ItemId, { title: string; description: string; color: string; icon: string }> = {
+  apple: { title: "Золотое яблоко", description: "Лечит 4 сердца", color: "#facc15", icon: "🍎" },
+  pearl: { title: "Эндер-жемчуг", description: "Бросок — телепорт туда, где упадёт", color: "#2dd4bf", icon: "🔮" },
+  shield: { title: "Щит", description: "8 секунд блокирует следующий удар или выстрел", color: "#93c5fd", icon: "🛡️" },
+  snowball: { title: "Снежок", description: "Без урона, но сильно отталкивает", color: "#e0f2fe", icon: "❄️" },
+  tnt: { title: "TNT", description: "Бросок, взрыв через 2,5 секунды", color: "#ef4444", icon: "🧨" },
+};
+export const ITEM_MAX = 8;
+export const APPLE_HEAL = 8;
+export const SHIELD_MS = 8000;
+export const SHIELD_KNOCKBACK = 0.3;
+export const TNT_FUSE_MS = 2500;
+/** Thrown items: speed along the view and gravity. */
+export const THROW = { snowball: { speed: 26, gravity: 14 }, pearl: { speed: 24, gravity: 14 }, tnt: { speed: 11, gravity: 20 } } as const;
+export type ProjKind = keyof typeof THROW;
+export const PROJ_KINDS: ProjKind[] = ["snowball", "pearl", "tnt"];
+
+/** A closed chest on the arena; walking into it opens it. */
+export interface ChestInfo {
+  id: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+// ---------------------------------------------------------------- quick chat
+
+export type EmoteId = "gg" | "lol" | "wave" | "point" | "thanks" | "oops";
+export const EMOTE_IDS: EmoteId[] = ["gg", "lol", "wave", "point", "thanks", "oops"];
+export const EMOTES: Record<EmoteId, { label: string; text: string; icon: string }> = {
+  gg: { label: "gg", text: "gg", icon: "🤝" },
+  lol: { label: "ха-ха", text: "ха-ха", icon: "😂" },
+  wave: { label: "помахать", text: "привет!", icon: "👋" },
+  point: { label: "показать", text: "туда!", icon: "👉" },
+  thanks: { label: "спасибо", text: "спасибо!", icon: "🙏" },
+  oops: { label: "упс", text: "упс…", icon: "😅" },
+};
+export const EMOTE_GAP_MS = 1500;
+/** Private rooms: codes of this many characters from this alphabet (no look-alikes). */
+export const ROOM_CODE_LEN = 5;
+export const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const normalizeRoomCode = (raw: unknown): string | null => {
+  if (typeof raw !== "string") return null;
+  const code = raw.trim().toUpperCase();
+  return code.length === ROOM_CODE_LEN && [...code].every((ch) => ROOM_ALPHABET.includes(ch)) ? code : null;
 };
 
 /** Where a client is: walking around the hub, or in the arena (playing, dead, or watching). */
@@ -707,6 +868,12 @@ export interface PlayerInfo {
   maxHp: number;
   /** King of the Hill points. */
   score: number;
+  /** Added by the server when fewer than BOT_FILL people play. */
+  bot: boolean;
+  /** Holds up a shield (item). */
+  shield: boolean;
+  sword: SwordKind;
+  level: number;
 }
 
 // ---------------------------------------------------------------- hub
@@ -899,7 +1066,8 @@ export interface BagInfo {
 }
 
 export type ClientMsg =
-  | { t: "hello"; name: string; v: number; color?: string; skin?: SkinId }
+  /** `token`: random id kept in the browser; progress (XP, unlocks, quests) belongs to it, not the name. */
+  | { t: "hello"; name: string; v: number; color?: string; skin?: SkinId; sword?: SwordKind; token?: string }
   /** `vy`: vertical velocity; `ts`: the client's physics clock (ms); `n`: last applied `tp`;
    *  `k`: last knockback (`hurt.kn`) applied to the player; `tk`: last `tick` received, i.e. how
    *  much of the game (buffs, blocks, ring) the client knew about when it moved; `sp`: sprinting. */
@@ -912,15 +1080,19 @@ export type ClientMsg =
   | { t: "ping"; id: number }
   /** Hub: watch the arena round (on) or go back to the hub (off). */
   | { t: "watch"; on: boolean }
-  /** Wardrobe: shirt colour and skin. */
-  | { t: "look"; color: string; skin: SkinId }
+  /** Wardrobe: shirt colour, skin and sword (locked ones are refused). */
+  | { t: "look"; color: string; skin: SkinId; sword?: SwordKind }
   /** Challenge a player in the hub to a duel; the other side answers with `duelAnswer`. */
   | { t: "duel"; id: number }
   | { t: "duelAnswer"; accept: boolean }
   /** Bows buff: shoot an arrow along this view (from the server's position for the player). */
   | { t: "shoot"; yaw: number; pitch: number; tk: number }
   /** An eliminated player votes for the next buff (index into `buffVote.options`). */
-  | { t: "buffVote"; i: number };
+  | { t: "buffVote"; i: number }
+  /** Uses one item from the bar; thrown ones fly along this view. */
+  | { t: "use"; item: ItemId; yaw: number; pitch: number; tk: number }
+  /** Quick chat; `point` carries the spot looked at. */
+  | { t: "emote"; e: EmoteId; x?: number; y?: number; z?: number };
 
 export interface DailyRecords {
   /** Moscow date, YYYY-MM-DD. */
@@ -945,7 +1117,7 @@ export interface RoundResult {
   /** Winning team in a team mode (the winner is its best player). */
   team: number | null;
   /** Ordered by finishing place. */
-  rows: { id: number; name: string; color: string; kills: number; damage: number; crits: number; blocks: number; score: number; team: number | null }[];
+  rows: { id: number; name: string; color: string; kills: number; damage: number; crits: number; blocks: number; score: number; team: number | null; bot: boolean }[];
   awards: { title: string; name: string; color: string; value: string }[];
 }
 
@@ -963,7 +1135,8 @@ export interface TrainStats {
 }
 
 export type ServerMsg =
-  | { t: "welcome"; id: number }
+  /** `room`: code of the private room, null on the public server. */
+  | { t: "welcome"; id: number; room: string | null }
   | { t: "roster"; players: PlayerInfo[] }
   | {
       t: "phase";
@@ -986,15 +1159,18 @@ export type ServerMsg =
   | { t: "world"; w: View; blocks: number[] }
   | { t: "block"; w: View; x: number; y: number; z: number; v: number }
   /** `s`: tick number. `p`: flat [id, x, y, z, yaw, pitch, hp, ...] for the players this client may see
-   *  in its world. Hub only: `m` mobs [id, kindIndex, x, y, z, yaw, hp, maxHp, ...] and `a` arrows
-   *  [id, x, y, z, vx, vy, vz, ...]. */
-  | { t: "tick"; s: number; p: number[]; m?: number[]; a?: number[] }
+   *  in its world. Hub only: `m` mobs [id, kindIndex, x, y, z, yaw, hp, maxHp, ...]. `a` arrows
+   *  [id, x, y, z, vx, vy, vz, ...]. Arena only: `pr` thrown items [id, PROJ_KINDS index, x, y, z,
+   *  vx, vy, vz, ...] (a primed TNT lies still). */
+  | { t: "tick"; s: number; p: number[]; m?: number[]; a?: number[]; pr?: number[] }
   /** `respawnIn`: ms until the player is back (respawn modes), 0 otherwise. */
-  | { t: "you"; hp: number; maxHp: number; dirt: number; arrows: number; alive: boolean; role: Role; watching: boolean; respawnIn: number }
+  /** `items`: counts in ITEM_IDS order; `shieldMs`: how long the raised shield lasts. */
+  | { t: "you"; hp: number; maxHp: number; dirt: number; arrows: number; alive: boolean; role: Role; watching: boolean; respawnIn: number; items: number[]; shieldMs: number }
   /** Authoritative position; `yaw` only on spawn, server corrections keep the player's view. */
   | { t: "tp"; x: number; y: number; z: number; n: number; yaw?: number }
   /** `kn`: the victim's knockback number (0 without knockback), echoed back in `move.k`. */
-  | { t: "hurt"; id: number; by: number; hp: number; dmg: number; crit: boolean; kx: number; ky: number; kz: number; kn: number; arrow?: boolean }
+  /** `arrow`: not a sword swing (arrow, snowball); `blocked`: a shield took it. */
+  | { t: "hurt"; id: number; by: number; hp: number; dmg: number; crit: boolean; kx: number; ky: number; kz: number; kn: number; arrow?: boolean; blocked?: boolean }
   | { t: "roulette"; buffs: BuffId[]; ms: number }
   /** `fall`: off the island; `killer` is whoever knocked the victim off, if anyone. */
   | { t: "kill"; victim: number; killer: number | null; reason: KillReason }
@@ -1010,7 +1186,11 @@ export type ServerMsg =
   | { t: "bomb"; holder: number | null; ms: number }
   /** A meteor lands at x, y, z in `ms` (radius `r`). */
   | { t: "meteor"; id: number; x: number; y: number; z: number; r: number; ms: number }
-  | { t: "boom"; x: number; y: number; z: number; r: number; kind: "bomb" | "meteor" }
+  | { t: "boom"; x: number; y: number; z: number; r: number; kind: "bomb" | "meteor" | "tnt" }
+  /** Closed chests on the arena (the full list whenever it changes). */
+  | { t: "chests"; chests: ChestInfo[] }
+  /** Someone used an item (sound and effect for everyone in the arena). */
+  | { t: "used"; id: number; item: ItemId }
   /** Mode scores: team kills (Teams) or survivors per team (Infection), the target, King of the
    *  Hill's holder (null: nobody or contested). */
   | { t: "score"; teams: number[]; target: number; hill: number | null; contested: boolean }
@@ -1020,7 +1200,8 @@ export type ServerMsg =
   | { t: "pong"; id: number }
   /** Lobby state, sent to everyone a few times a second. `startIn`: ms until the round starts (null:
    *  waiting for players); `votes` in MODE_IDS order. */
-  | { t: "hub"; startIn: number | null; ready: number; active: number; need: number; votes: number[]; myVote: GameMode | null; inRound: number }
+  /** `bots`: the round is topped up with bots to this many players (0: no bots). */
+  | { t: "hub"; startIn: number | null; ready: number; active: number; need: number; votes: number[]; myVote: GameMode | null; inRound: number; bots: number }
   | { t: "train"; s: TrainStats }
   /** A short tip for the player (why a hit didn't count, how to crit…). */
   | { t: "hint"; text: string }
@@ -1036,7 +1217,14 @@ export type ServerMsg =
   | { t: "records"; r: DailyRecords }
   | { t: "results"; r: RoundResult }
   /** Hub-wide news line (duel results, records, round winner). */
-  | { t: "notice"; text: string; color: string };
+  | { t: "notice"; text: string; color: string }
+  /** Progress of this browser's profile. */
+  | { t: "profile"; p: ProfileInfo }
+  | { t: "weekly"; w: WeeklyBoard }
+  /** XP for the round just played: `lines` [why, xp]; `unlocked`: names of new skins/swords. */
+  | { t: "reward"; xp: number; lines: [string, number][]; level: number; levelUp: boolean; unlocked: string[] }
+  /** Quick chat from player `id` (to everyone in the same world). */
+  | { t: "emote"; id: number; e: EmoteId; x?: number; y?: number; z?: number };
 
 export const PLAYER_COLORS = [
   "#e74c3c", "#3498db", "#2ecc71", "#f1c40f", "#9b59b6", "#e67e22",

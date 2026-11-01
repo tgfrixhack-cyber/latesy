@@ -1,3 +1,4 @@
+import { SKIN_BASE } from "../shared";
 import type { MobKind, SkinId } from "../shared";
 
 // Player skins as HD Minecraft skins: Minecraft's 64×64 skin layout, drawn at twice its resolution
@@ -68,6 +69,9 @@ export const INFLATE: Record<SkinId, Inflate> = {
   knight: { head: 0.6, body: 0.35, arm: 0.5, leg: 0.35 },
   ninja: LAYER2,
   robot: { head: 0.5, body: 0.25, arm: 0.4, leg: 0.4 },
+  goldknight: { head: 0.6, body: 0.35, arm: 0.5, leg: 0.35 },
+  shadow: LAYER2,
+  mech: { head: 0.5, body: 0.25, arm: 0.4, leg: 0.4 },
 };
 
 export const HAIRS = ["#3b2416", "#6b4423", "#1f1f1f", "#c58b3c", "#8a2f1b"];
@@ -747,7 +751,33 @@ const robot: Painter = (s, { color }) => {
   limbShading(s);
 };
 
-const PAINTERS: Record<SkinId, Painter> = { steve, skeleton, zombie, knight, ninja, robot };
+const PAINTERS: Partial<Record<SkinId, Painter>> = { steve, skeleton, zombie, knight, ninja, robot };
+
+/** Unlockable skins repaint their base skin's grey parts (steel, cloth) along a gradient, dark to
+ *  light; skin tones and the player's colour keep their hue. */
+const RECOLOR: Partial<Record<SkinId, [string, string]>> = {
+  goldknight: ["#5a3c06", "#ffe27a"],
+  shadow: ["#0b0612", "#9b6ad6"],
+  mech: ["#1c1414", "#e0523a"],
+};
+
+function recolor(data: Uint8ClampedArray, [dark, light]: [string, string]) {
+  const a = rgb(dark);
+  const b = rgb(light);
+  for (let i = 0; i < data.length; i += 4) {
+    if (!data[i + 3]) continue;
+    const r = data[i];
+    const g = data[i + 1];
+    const bl = data[i + 2];
+    const max = Math.max(r, g, bl);
+    const min = Math.min(r, g, bl);
+    if (max && (max - min) / max > 0.2) continue;
+    const t = Math.min(1, ((r + g + bl) / 3 / 255) * 1.15);
+    data[i] = a[0] + (b[0] - a[0]) * t;
+    data[i + 1] = a[1] + (b[1] - a[1]) * t;
+    data[i + 2] = a[2] + (b[2] - a[2]) * t;
+  }
+}
 
 export interface SkinSheet {
   canvas: HTMLCanvasElement;
@@ -769,7 +799,9 @@ export function skinSheet(skin: SkinId, look: Look): SkinSheet {
   for (const ch of key) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
   const s = new Sheet(thin, seed);
   for (const p of PARTS) s.all(p, "base", (f) => f.fill("#808080"));
-  PAINTERS[skin](s, look);
+  PAINTERS[SKIN_BASE[skin]]?.(s, look);
+  const re = RECOLOR[skin];
+  if (re) recolor(s.data, re);
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = SIZE;
   canvas.getContext("2d")!.putImageData(new ImageData(s.data, SIZE, SIZE), 0, 0);

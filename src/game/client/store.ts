@@ -1,5 +1,5 @@
-import { ARENA_RADIUS, makeTimings } from "../shared";
-import type { BuffId, DailyRecords, GameMode, KillReason, Phase, PlayerInfo, Role, RoundResult, SkinId, Timings, TrainStats, View } from "../shared";
+import { ARENA_RADIUS, ITEM_IDS, makeTimings } from "../shared";
+import type { BuffId, DailyRecords, EmoteId, GameMode, KillReason, Phase, PlayerInfo, ProfileInfo, Role, RoundResult, SkinId, SwordKind, Timings, TrainStats, View, WeeklyBoard } from "../shared";
 
 export type SpecMode = "free" | "first" | "third";
 
@@ -9,6 +9,14 @@ export interface FeedItem {
   killer: { name: string; color: string } | null;
   victim: { name: string; color: string };
   reason: KillReason;
+}
+
+export interface ChatLine {
+  key: number;
+  at: number;
+  name: string;
+  color: string;
+  e: EmoteId;
 }
 
 export interface Notice {
@@ -61,6 +69,10 @@ export interface UiState {
   winTeam: number | null;
   hp: number;
   dirt: number;
+  /** Item counts in ITEM_IDS order. */
+  items: number[];
+  /** When the raised shield drops (0: none). */
+  shieldUntil: number;
   alive: boolean;
   role: Role;
   winnerId: number | null;
@@ -82,7 +94,7 @@ export interface UiState {
 
   // ---- hub
   /** Lobby: `startAt` is when the round starts (null: waiting for players). */
-  hub: { startAt: number | null; ready: number; active: number; need: number; votes: Record<GameMode, number>; myVote: GameMode | null; inRound: number } | null;
+  hub: { startAt: number | null; ready: number; active: number; need: number; votes: Record<GameMode, number>; myVote: GameMode | null; inRound: number; bots: number } | null;
   /** Training stats against the skeletons; null until the first hit/arrow. */
   train: TrainStats | null;
   hint: { key: number; text: string; at: number } | null;
@@ -103,12 +115,23 @@ export interface UiState {
   /** Overlays. */
   help: boolean;
   wardrobe: boolean;
+  /** Progress, quests and the weekly board (P). */
+  profileOpen: boolean;
+  /** Quick chat menu (G). */
+  quickChat: boolean;
+  /** Private room code, null on the public server. */
+  room: string | null;
+  profile: ProfileInfo | null;
+  weekly: WeeklyBoard | null;
+  /** XP for the last round, shown on the end screen. */
+  reward: { xp: number; lines: [string, number][]; level: number; levelUp: boolean; unlocked: string[]; at: number } | null;
+  chat: ChatLine[];
   /** Standing close enough to the wardrobe to open it (E). */
   nearWardrobe: boolean;
   /** Player looked at in the hub who can be challenged (F). */
   duelTarget: { id: number; name: string } | null;
   /** Chosen look, saved in localStorage. */
-  look: { color: string; skin: SkinId };
+  look: { color: string; skin: SkinId; sword: SwordKind };
 }
 
 export const initialUi = (): UiState => ({
@@ -137,6 +160,8 @@ export const initialUi = (): UiState => ({
   winTeam: null,
   hp: 20,
   dirt: 0,
+  items: ITEM_IDS.map(() => 0),
+  shieldUntil: 0,
   alive: false,
   role: "spectator",
   winnerId: null,
@@ -165,9 +190,16 @@ export const initialUi = (): UiState => ({
   notices: [],
   help: false,
   wardrobe: false,
+  profileOpen: false,
+  quickChat: false,
+  room: null,
+  profile: null,
+  weekly: null,
+  reward: null,
+  chat: [],
   nearWardrobe: false,
   duelTarget: null,
-  look: { color: "#e74c3c", skin: "steve" },
+  look: { color: "#e74c3c", skin: "steve", sword: "stone" },
 });
 
 export interface Store<T> {

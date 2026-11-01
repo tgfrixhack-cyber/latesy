@@ -7,8 +7,16 @@ import {
   CLOSE_BANNED,
   CLOSE_FULL,
   CLOSE_KICKED,
+  CLOSE_NO_ROOM,
   CLOSE_OUTDATED,
+  CLOSE_ROOMS_FULL,
   CLOSE_TOO_MANY,
+  EMOTES,
+  EMOTE_IDS,
+  ITEM_IDS,
+  PROJ_KINDS,
+  SWORD_KINDS,
+  THROW,
   EYE_HEIGHT,
   GRAVITY,
   HIT_COOLDOWN_MS,
@@ -41,8 +49,9 @@ import {
   roundClock,
   stepBody,
 } from "../shared";
-import type { BagInfo, Body, BuffId, ClientMsg, GameMode, MobKind, PlayerInfo, ServerMsg, SkinId, VoxelHit } from "../shared";
-import { Avatar } from "./avatar";
+import type { BagInfo, Body, BuffId, ChestInfo, ClientMsg, EmoteId, GameMode, ItemId, MobKind, PlayerInfo, ProjKind, ServerMsg, SkinId, SwordKind, VoxelHit } from "../shared";
+import { Avatar, tntTexture } from "./avatar";
+import type { Gesture } from "./avatar";
 import { DamageNumbers, Explosions, Fireworks, Footprints, MeteorMarks, Particles } from "./effects";
 import { HubScene } from "./hub-scene";
 import { GeometryBuilder, applyFloorAo, buildBlockGeometry, buildFloor } from "./meshing";
@@ -165,12 +174,89 @@ const FIREWORK_COLORS = ["#ff4d6d", "#ffd166", "#06d6a0", "#4cc9f0", "#c77dff", 
 type Mode = "orbit" | "frozen" | "play" | "spectate";
 type Target = { id: number; t: number; mob: boolean };
 
-function serverUrl() {
+/** `room`: a private room's code, or "new" to open one. */
+function serverUrl(room: string | null) {
   const configured = process.env.NEXT_PUBLIC_GAME_SERVER_URL;
-  if (configured) return configured;
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}${WS_PATH}`;
+  const base = configured || `${proto}://${location.host}${WS_PATH}`;
+  return room ? `${base}${base.includes("?") ? "&" : "?"}room=${encodeURIComponent(room)}` : base;
 }
+
+const TOKEN_KEY = "pvp-token";
+
+/** This browser's progress token: random, made once and kept in localStorage. Progress is tied to
+ *  it, so a nickname alone can't take it over. */
+export function loadToken(): string {
+  try {
+    const saved = localStorage.getItem(TOKEN_KEY);
+    if (saved && /^[a-f0-9]{32,64}$/.test(saved)) return saved;
+  } catch {
+    // No storage: a token for this session only.
+  }
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const token = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    // Kept for this session.
+  }
+  return token;
+}
+
+/** Moves progress to this browser: the token from another one replaces ours. */
+export function saveToken(token: string): boolean {
+  const t = token.trim().toLowerCase();
+  if (!/^[a-f0-9]{32,64}$/.test(t)) return false;
+  try {
+    localStorage.setItem(TOKEN_KEY, t);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A closed chest: planks body, darker lid, a gold latch. */
+function createChest() {
+  const g = new THREE.Group();
+  const wood = new THREE.MeshLambertMaterial({ color: "#9c6a35" });
+  const dark = new THREE.MeshLambertMaterial({ color: "#6b4420" });
+  const gold = new THREE.MeshLambertMaterial({ color: "#facc15", emissive: "#6b5200" });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.5, 0.8), wood);
+  body.position.y = 0.25;
+  const lid = new THREE.Mesh(new THREE.BoxGeometry(0.84, 0.22, 0.84), dark);
+  lid.position.y = 0.6;
+  const latch = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.2, 0.06), gold);
+  latch.position.set(0, 0.5, 0.43);
+  const rim = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.05, 0.86), gold);
+  rim.position.y = 0.49;
+  body.castShadow = lid.castShadow = true;
+  g.add(body, lid, latch, rim);
+  return g;
+}
+
+/** Thrown items: a snowball, an ender pearl, a TNT block. */
+function createProjectile(kind: ProjKind) {
+  const g = new THREE.Group();
+  if (kind === "tnt") {
+    const side = new THREE.MeshLambertMaterial({ map: tntTexture(false) });
+    const cap = new THREE.MeshLambertMaterial({ map: tntTexture(true) });
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.7), [side, side, cap, cap, side, side]);
+    m.position.y = 0.35;
+    m.castShadow = true;
+    g.add(m);
+  } else {
+    const snow = kind === "snowball";
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(0.24, 0.24, 0.24),
+      new THREE.MeshLambertMaterial({ color: snow ? "#f8fafc" : "#1f7a70", emissive: snow ? "#334155" : "#0b3b36" }),
+    );
+    g.add(m);
+  }
+  return g;
+}
+
+const GESTURES: Partial<Record<EmoteId, Gesture>> = { wave: "wave", point: "point" };
 
 function reelItems(target: BuffId, count = 26): BuffId[] {
   const list: BuffId[] = [];
@@ -195,6 +281,10 @@ function closeReasonText(code: number, reason: string): string | null {
       return `Временный бан${reason ? `: ${reason}` : ""}.`;
     case CLOSE_FULL:
       return "Сервер переполнен, попробуйте позже.";
+    case CLOSE_NO_ROOM:
+      return "Комнаты с таким кодом нет — проверьте код или создайте новую.";
+    case CLOSE_ROOMS_FULL:
+      return "На сервере слишком много комнат, попробуйте позже.";
     default:
       return null;
   }
@@ -202,11 +292,12 @@ function closeReasonText(code: number, reason: string): string | null {
 
 /** The look chosen in the wardrobe, or null before the player ever picked one (the server then
  *  hands out a free colour). */
-function loadLook(): { color: string; skin: SkinId } | null {
+function loadLook(): { color: string; skin: SkinId; sword: SwordKind } | null {
   try {
-    const raw = JSON.parse(localStorage.getItem(LOOK_KEY) ?? "null") as { color?: unknown; skin?: unknown } | null;
+    const raw = JSON.parse(localStorage.getItem(LOOK_KEY) ?? "null") as { color?: unknown; skin?: unknown; sword?: unknown } | null;
     if (raw && PLAYER_COLORS.includes(raw.color as string) && SKIN_IDS.includes(raw.skin as SkinId)) {
-      return { color: raw.color as string, skin: raw.skin as SkinId };
+      const sword = SWORD_KINDS.includes(raw.sword as SwordKind) ? (raw.sword as SwordKind) : "stone";
+      return { color: raw.color as string, skin: raw.skin as SkinId, sword };
     }
   } catch {
     // Private mode or a broken value: fall back to the server's choice.
@@ -297,8 +388,16 @@ export class Engine {
   private arrows = new Map<number, { group: THREE.Group; vel: THREE.Vector3 }>();
   private dying: Avatar[] = [];
   private bags = new Map<number, { info: BagInfo; group: THREE.Group }>();
+  private chests = new Map<number, { info: ChestInfo; group: THREE.Group }>();
+  private projs = new Map<number, { group: THREE.Group; vel: THREE.Vector3; kind: ProjKind }>();
+  /** "Look there" marks from quick chat. */
+  private pointMarks: { group: THREE.Group; until: number }[] = [];
   private ws: WebSocket | null = null;
   private name = "";
+  /** Private room to join ("new": open one); null for the public server. */
+  private room: string | null = null;
+  private token = "";
+  private lastUseAt = 0;
   private keys = new Set<string>();
   private mouse = { left: false, right: false };
   private resize: ResizeObserver;
@@ -533,10 +632,53 @@ export class Engine {
 
   // ------------------------------------------------------------------ public API
 
-  join(name: string) {
+  join(name: string, room: string | null = null) {
     sfx.unlock();
     this.name = name;
+    this.room = room;
     this.connect();
+  }
+
+  /** To another room (a code, "new") or back to the public server (null). */
+  switchRoom(room: string | null) {
+    if (!this.name) return;
+    this.room = room;
+    this.store.set({ room: null, profileOpen: false, quickChat: false });
+    this.connect();
+  }
+
+  /** Item bar: keys 1–5. Thrown items fly along the view. */
+  useItem(i: number) {
+    const s = this.store.get();
+    const item = ITEM_IDS[i];
+    if (!item || !s.alive || s.view !== "arena" || s.phase !== "playing" || s.watching || (s.items[i] ?? 0) <= 0) return;
+    const now = performance.now();
+    if (now - this.lastUseAt < 350) return;
+    this.lastUseAt = now;
+    this.flushMove();
+    this.send({ t: "use", item, yaw: this.yaw, pitch: this.pitch, tk: this.lastTick });
+    if (item in THROW) this.swingAt = now;
+  }
+
+  /** Quick chat; "point" marks the spot under the crosshair. */
+  emote(e: EmoteId) {
+    this.store.set({ quickChat: false });
+    if (e !== "point") return this.send({ t: "emote", e });
+    const { origin, dir } = this.eyeRay();
+    const hit = raycastVoxels(this.world, origin, dir, 60);
+    let at: THREE.Vector3;
+    if (hit) at = new THREE.Vector3(hit.x + 0.5 + hit.nx * 0.5, hit.y + (hit.ny > 0 ? 1 : 0.5) + (hit.ny < 0 ? -0.5 : 0), hit.z + 0.5 + hit.nz * 0.5);
+    else if (dir.y < -0.05) at = origin.clone().addScaledVector(dir, Math.min(60, -origin.y / dir.y));
+    else at = origin.clone().addScaledVector(dir, 25);
+    this.send({ t: "emote", e, x: Math.round(at.x * 100) / 100, y: Math.round(at.y * 100) / 100, z: Math.round(at.z * 100) / 100 });
+  }
+
+  setQuickChat(open: boolean) {
+    this.store.set({ quickChat: open });
+  }
+
+  setProfile(open: boolean) {
+    this.setOverlay({ profileOpen: open, ...(open ? { help: false, wardrobe: false } : {}) });
   }
 
   reconnect() {
@@ -545,9 +687,9 @@ export class Engine {
   }
 
   /** Wardrobe pick: saved locally, sent to the server, shown to everyone with the next roster. */
-  setLook(color: string, skin: SkinId) {
-    if (!PLAYER_COLORS.includes(color) || !SKIN_IDS.includes(skin)) return;
-    const look = { color, skin };
+  setLook(color: string, skin: SkinId, sword: SwordKind = this.store.get().look.sword) {
+    if (!PLAYER_COLORS.includes(color) || !SKIN_IDS.includes(skin) || !SWORD_KINDS.includes(sword)) return;
+    const look = { color, skin, sword };
     this.store.set({ look });
     this.lookPendingUntil = performance.now() + 2000;
     try {
@@ -568,8 +710,8 @@ export class Engine {
       return;
     }
     this.lookSentAt = performance.now();
-    const { color, skin } = this.store.get().look;
-    this.send({ t: "look", color, skin });
+    const { color, skin, sword } = this.store.get().look;
+    this.send({ t: "look", color, skin, sword });
   };
 
   /** Mouse sensitivity multiplier, saved in the browser. */
@@ -585,11 +727,11 @@ export class Engine {
   }
 
   setWardrobe(open: boolean) {
-    this.setOverlay({ wardrobe: open, ...(open ? { help: false } : {}) });
+    this.setOverlay({ wardrobe: open, ...(open ? { help: false, profileOpen: false } : {}) });
   }
 
   setHelp(open: boolean) {
-    this.setOverlay({ help: open, ...(open ? { wardrobe: false } : {}) });
+    this.setOverlay({ help: open, ...(open ? { wardrobe: false, profileOpen: false } : {}) });
   }
 
   answerDuel(accept: boolean) {
@@ -655,8 +797,9 @@ export class Engine {
     this.ws?.close();
     this.store.set({ conn: "connecting", closeReason: null });
     let ws: WebSocket;
+    if (!this.token) this.token = loadToken();
     try {
-      ws = new WebSocket(serverUrl());
+      ws = new WebSocket(serverUrl(this.room));
     } catch {
       this.store.set({ conn: "closed" });
       return;
@@ -666,7 +809,7 @@ export class Engine {
       this.store.set({ conn: "open" });
       // Only a look the player picked is sent; otherwise the server hands out a free colour.
       const look = loadLook();
-      ws.send(JSON.stringify({ t: "hello", name: this.name, v: PROTOCOL_VERSION, ...(look ?? {}) } satisfies ClientMsg));
+      ws.send(JSON.stringify({ t: "hello", name: this.name, v: PROTOCOL_VERSION, token: this.token, ...(look ?? {}) } satisfies ClientMsg));
       this.startPing();
     };
     ws.onmessage = (e) => {
@@ -689,6 +832,8 @@ export class Engine {
         duel: null,
         duelTarget: null,
         nearWardrobe: false,
+        profileOpen: false,
+        quickChat: false,
       });
       this.clearWorldObjects();
       if (document.pointerLockElement) document.exitPointerLock();
@@ -760,22 +905,40 @@ export class Engine {
     const now = performance.now();
     switch (m.t) {
       case "welcome":
-        this.store.set({ myId: m.id });
+        this.store.set({ myId: m.id, room: m.room });
+        this.room = m.room;
+        try {
+          // The page's address carries the room, so it can be shared and survives a reload.
+          const url = new URL(location.href);
+          if (m.room) url.searchParams.set("room", m.room);
+          else url.searchParams.delete("room");
+          history.replaceState(history.state, "", url);
+        } catch {
+          // Not in a normal page (tests): nothing to update.
+        }
         break;
       case "roster": {
         const s = this.store.get();
         const me = m.players.find((p) => p.id === s.myId);
-        const syncLook = me && now > this.lookPendingUntil && (me.color !== s.look.color || me.skin !== s.look.skin);
-        this.store.set({ players: m.players, ...(syncLook ? { look: { color: me.color, skin: me.skin } } : {}) });
+        const syncLook = me && now > this.lookPendingUntil && (me.color !== s.look.color || me.skin !== s.look.skin || me.sword !== s.look.sword);
+        this.store.set({ players: m.players, ...(syncLook ? { look: { color: me.color, skin: me.skin, sword: me.sword } } : {}) });
+        // Our sword in hand is the one the server let us hold.
+        if (me && me.sword !== swordStyle.kind) this.setSword({ kind: me.sword });
         const byId = new Map(m.players.map((p) => [p.id, p]));
         const self = this.selfAvatar;
-        if (self && (!me || me.skin !== self.skin || me.color !== self.color)) this.dropSelfAvatar();
-        else if (self && me) self.setCrown(me.crown);
+        if (self && (!me || me.skin !== self.skin || me.color !== self.color || me.sword !== self.swordKind)) this.dropSelfAvatar();
+        else if (self && me) {
+          self.setCrown(me.crown);
+          self.setShield(me.shield);
+        }
         for (const [id, a] of this.avatars) {
           const info = byId.get(id);
           // A new look needs a new model: the next tick builds it.
-          if (!info || info.skin !== a.skin || info.color !== a.color) this.removeAvatar(id);
-          else a.setCrown(info.crown);
+          if (!info || info.skin !== a.skin || info.color !== a.color || info.sword !== a.swordKind) this.removeAvatar(id);
+          else {
+            a.setCrown(info.crown);
+            a.setShield(info.shield);
+          }
         }
         break;
       }
@@ -851,7 +1014,7 @@ export class Engine {
       case "boom": {
         const at = new THREE.Vector3(m.x, m.y, m.z);
         this.meteorMarks.update(now);
-        this.explosions.spawn(m.x, m.y - (m.kind === "bomb" ? 0.9 : 0.3), m.z, m.r, now);
+        this.explosions.spawn(m.x, m.y - (m.kind === "bomb" ? 0.9 : m.kind === "tnt" ? 0.5 : 0.3), m.z, m.r, now);
         this.particles.burst(at, EMBERS, 30, 9, 0.18);
         this.particles.burst(at, POOF, 16, 4, 0.25);
         sfx.boom(this.spatial(at));
@@ -884,6 +1047,7 @@ export class Engine {
         this.onTick(m.p);
         this.syncMobs(m.m ?? [], now);
         this.syncArrows(m.a ?? [], now);
+        this.syncProjectiles(m.pr ?? []);
         break;
       case "you": {
         const s = this.store.get();
@@ -894,7 +1058,8 @@ export class Engine {
           this.specYaw = this.yaw;
           this.specPitch = this.pitch;
         }
-        if (s.alive && m.alive && m.dirt >= s.dirt + 2) sfx.pickup();
+        const items = m.items ?? ITEM_IDS.map(() => 0);
+        if (s.alive && m.alive && (m.dirt >= s.dirt + 2 || items.some((n, i) => n > (s.items[i] ?? 0)))) sfx.pickup();
         if (s.view === "arena" && s.phase === "playing" && !s.alive && m.alive) sfx.respawn();
         this.store.set({
           hp: m.hp,
@@ -905,6 +1070,8 @@ export class Engine {
           role: m.role,
           watching: m.watching,
           respawnAt: m.respawnIn ? now + m.respawnIn : 0,
+          items,
+          shieldUntil: m.shieldMs ? now + m.shieldMs : 0,
         });
         break;
       }
@@ -929,6 +1096,25 @@ export class Engine {
       case "bags":
         this.syncBags(m.bags);
         break;
+      case "chests":
+        this.syncChests(m.chests);
+        break;
+      case "used":
+        this.onUsed(m.id, m.item, now);
+        break;
+      case "profile":
+        this.store.set({ profile: m.p });
+        break;
+      case "weekly":
+        this.store.set({ weekly: m.w });
+        break;
+      case "reward":
+        this.store.set({ reward: { xp: m.xp, lines: m.lines, level: m.level, levelUp: m.levelUp, unlocked: m.unlocked, at: now } });
+        if (m.levelUp || m.unlocked.length) sfx.horn();
+        break;
+      case "emote":
+        this.onEmote(m, now);
+        break;
       case "pong": {
         const at = this.pingSent.get(m.id);
         if (at === undefined) break;
@@ -939,7 +1125,7 @@ export class Engine {
       case "hub": {
         const votes = Object.fromEntries(MODE_IDS.map((id, i) => [id, m.votes[i] ?? 0])) as Record<GameMode, number>;
         this.store.set({
-          hub: { startAt: m.startIn === null ? null : now + m.startIn, ready: m.ready, active: m.active, need: m.need, votes, myVote: m.myVote, inRound: m.inRound },
+          hub: { startAt: m.startIn === null ? null : now + m.startIn, ready: m.ready, active: m.active, need: m.need, votes, myVote: m.myVote, inRound: m.inRound, bots: m.bots },
         });
         break;
       }
@@ -1173,6 +1359,10 @@ export class Engine {
     for (const a of this.arrows.values()) this.disposeGroup(a.group);
     this.arrows.clear();
     this.syncBags([]);
+    this.syncChests([]);
+    this.syncProjectiles([]);
+    for (const p of this.pointMarks) this.disposeGroup(p.group);
+    this.pointMarks = [];
     this.recentSwings.clear();
   }
 
@@ -1192,10 +1382,10 @@ export class Engine {
     });
   }
 
-  private setOverlay(patch: Partial<Pick<UiState, "wardrobe" | "help">>) {
+  private setOverlay(patch: Partial<Pick<UiState, "wardrobe" | "help" | "profileOpen">>) {
     this.store.set(patch);
     const s = this.store.get();
-    if (s.wardrobe || s.help) {
+    if (s.wardrobe || s.help || s.profileOpen) {
       this.keys.clear();
       this.mouse.left = this.mouse.right = false;
       if (document.pointerLockElement) document.exitPointerLock();
@@ -1235,10 +1425,13 @@ export class Engine {
     const bits = victim?.mob ? BONE_DUST : BLOOD;
     this.particles.burst(at, bits, m.by ? 8 : 4, 4);
     if (m.crit) this.particles.burst(at, STARS, 18, 6, 0.12);
-    if (victim) {
+    if (victim && m.blocked) {
+      this.numbers.spawn(victim.pos.clone().setY(victim.pos.y + 2.45), "БЛОК", "#93c5fd", mine, now);
+    } else if (victim && m.dmg > 0) {
       const color = !m.by ? "#ff9f1c" : mine ? (m.crit ? "#ff8c1a" : "#ffde59") : m.crit ? "#ffc266" : "#ffffff";
       this.numbers.spawn(victim.pos.clone().setY(victim.pos.y + 2.45), `-${m.dmg}${m.crit ? "!" : ""}`, color, mine || m.crit, now);
     }
+    if (m.blocked) sfx.place(toMe ? undefined : this.spatial(at));
     if (m.arrow) {
       sfx.arrowHit(toMe ? undefined : this.spatial(at));
     } else if (mine) {
@@ -1303,8 +1496,9 @@ export class Engine {
       if (!a) {
         const info = s.players.find((pl) => pl.id === id);
         if (!info) continue;
-        a = new Avatar(id, info.name, info.color, { skin: info.skin });
+        a = new Avatar(id, info.bot ? `🤖 ${info.name}` : info.name, info.color, { skin: info.skin, sword: info.sword });
         a.setCrown(info.crown);
+        a.setShield(info.shield);
         const swungAt = this.recentSwings.get(id);
         if (swungAt !== undefined) a.swing(swungAt);
         this.avatars.set(id, a);
@@ -1397,6 +1591,100 @@ export class Engine {
     if (!a) return;
     this.dropModel(a);
     this.avatars.delete(id);
+  }
+
+  private syncChests(list: ChestInfo[]) {
+    const ids = new Set(list.map((c) => c.id));
+    for (const [id, c] of this.chests) {
+      if (ids.has(id)) continue;
+      const at = c.group.position.clone().setY(c.group.position.y + 0.5);
+      this.particles.burst(at, ["#facc15", "#9c6a35", "#ffffff"], 18, 5, 0.12);
+      if (this.store.get().view === "arena") sfx.pickup();
+      this.disposeGroup(c.group);
+      this.chests.delete(id);
+    }
+    for (const info of list) {
+      if (this.chests.has(info.id)) continue;
+      const group = createChest();
+      group.position.set(info.x, info.y, info.z);
+      group.rotation.y = (info.id * 1.7) % (Math.PI * 2);
+      this.scene.add(group);
+      this.chests.set(info.id, { info, group });
+      this.particles.burst(new THREE.Vector3(info.x, info.y + 0.6, info.z), STARS, 10, 3, 0.1);
+    }
+  }
+
+  /** Thrown items: [id, kind, x, y, z, vx, vy, vz, ...]; between ticks they fly on locally. */
+  private syncProjectiles(rows: number[]) {
+    const seen = new Set<number>();
+    for (let i = 0; i + 7 < rows.length; i += 8) {
+      const id = rows[i];
+      const kind = PROJ_KINDS[rows[i + 1]] ?? "snowball";
+      seen.add(id);
+      let p = this.projs.get(id);
+      if (!p) {
+        p = { group: createProjectile(kind), vel: new THREE.Vector3(), kind };
+        this.projs.set(id, p);
+        this.scene.add(p.group);
+      }
+      p.group.position.set(rows[i + 2], rows[i + 3], rows[i + 4]);
+      p.vel.set(rows[i + 5], rows[i + 6], rows[i + 7]);
+    }
+    for (const [id, p] of this.projs) {
+      if (seen.has(id)) continue;
+      const at = p.group.position.clone();
+      if (p.kind === "snowball") this.particles.burst(at, POOF, 10, 3, 0.1);
+      if (p.kind === "pearl") this.particles.burst(at, ["#2dd4bf", "#a855f7", "#0f766e"], 16, 4, 0.12);
+      this.disposeGroup(p.group);
+      this.projs.delete(id);
+    }
+  }
+
+  /** Someone used an item: what everyone sees and hears. */
+  private onUsed(id: number, item: ItemId, now: number) {
+    const s = this.store.get();
+    const a = id === s.myId ? null : this.avatars.get(id);
+    const pos = id === s.myId ? this.pos.clone() : a?.pos.clone();
+    if (!pos) return;
+    const sp = id === s.myId ? undefined : this.spatial(pos);
+    pos.y += 1.2;
+    if (item === "apple") {
+      this.particles.burst(pos, ["#facc15", "#fde68a", "#ef4444"], 16, 3, 0.12);
+      sfx.respawn();
+    } else if (item === "shield") {
+      sfx.place(sp);
+    } else {
+      a?.swing(now);
+      sfx.swing(sp);
+      if (item === "tnt") sfx.bombTick(false);
+    }
+  }
+
+  private onEmote(m: Extract<ServerMsg, { t: "emote" }>, now: number) {
+    const s = this.store.get();
+    const p = s.players.find((pl) => pl.id === m.id);
+    if (!p) return;
+    const def = EMOTES[m.e];
+    const gesture = GESTURES[m.e] ?? null;
+    const a = m.id === s.myId ? this.selfAvatar : this.avatars.get(m.id);
+    a?.emote(gesture, `${def.icon} ${def.text}`, now);
+    if (m.e === "point" && m.x !== undefined && m.y !== undefined && m.z !== undefined) this.addPointMark(m.x, m.y, m.z, p.color, now);
+    this.store.set((st) => ({ chat: [...st.chat.slice(-4), { key: ++this.uiKey, at: now, name: p.name, color: p.color, e: m.e }] }));
+    sfx.beep(false);
+  }
+
+  /** A beam and a ring where someone pointed: visible through the map for a few seconds. */
+  private addPointMark(x: number, y: number, z: number, color: string, now: number) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, depthTest: false, depthWrite: false, fog: false });
+    const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 6, 8).translate(0, 3, 0), mat);
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.7, 24).rotateX(-Math.PI / 2), mat.clone());
+    ring.position.y = 0.05;
+    beam.renderOrder = ring.renderOrder = 10;
+    g.add(beam, ring);
+    g.position.set(x, y, z);
+    this.scene.add(g);
+    this.pointMarks.push({ group: g, until: now + 4500 });
   }
 
   private syncBags(list: BagInfo[]) {
@@ -1533,13 +1821,21 @@ export class Engine {
     const s = this.store.get();
     if (s.conn !== "open") return;
     const inHub = s.view === "hub" && !s.watching;
-    const overlay = s.wardrobe || s.help;
+    const overlay = s.wardrobe || s.help || s.profileOpen;
     if (!e.repeat) {
-      if (overlay && (e.code === "Escape" || (e.code === "KeyE" && s.wardrobe) || (e.code === "KeyH" && s.help))) {
-        this.setOverlay({ wardrobe: false, help: false });
+      if (overlay && (e.code === "Escape" || (e.code === "KeyE" && s.wardrobe) || (e.code === "KeyH" && s.help) || (e.code === "KeyP" && s.profileOpen))) {
+        this.setOverlay({ wardrobe: false, help: false, profileOpen: false });
         return;
       }
+      if (s.quickChat && !overlay) {
+        const n = /^Digit([1-6])$/.exec(e.code);
+        if (n) return this.emote(EMOTE_IDS[Number(n[1]) - 1]);
+        if (e.code === "Escape" || e.code === "KeyG") return this.setQuickChat(false);
+      } else if (e.code === "KeyG" && !overlay) {
+        return this.setQuickChat(true);
+      }
       if (e.code === "KeyH" && inHub) return this.setHelp(true);
+      if (e.code === "KeyP" && inHub && !overlay) return this.setProfile(true);
       if ((e.code === "KeyY" || e.code === "KeyN") && s.invite && performance.now() - s.invite.at < INVITE_MS) {
         return this.answerDuel(e.code === "KeyY");
       }
@@ -1558,6 +1854,7 @@ export class Engine {
     if (e.code === "KeyV" && (mode === "play" || mode === "frozen")) this.thirdPerson = !this.thirdPerson;
     if (e.code === "KeyQ" && mode === "play" && s.view === "arena") this.shoot();
     if (/^Digit[123]$/.test(e.code) && s.vote && !s.alive) this.vote(Number(e.code.slice(5)) - 1);
+    if (/^Digit[1-5]$/.test(e.code) && mode === "play" && s.view === "arena" && s.alive) this.useItem(Number(e.code.slice(5)) - 1);
     if (inHub) {
       if (e.code === "KeyE" && s.nearWardrobe && !this.inDuel()) this.setWardrobe(true);
       if (e.code === "KeyF" && s.duelTarget && !this.inDuel()) this.send({ t: "duel", id: s.duelTarget.id });
@@ -1586,7 +1883,7 @@ export class Engine {
     sfx.unlock();
     const mode = this.mode;
     const s = this.store.get();
-    if (mode === "orbit" || s.wardrobe || s.help) return;
+    if (mode === "orbit" || s.wardrobe || s.help || s.profileOpen) return;
     const el = this.renderer.domElement;
     if (document.pointerLockElement !== el) {
       this.lockPointer();
@@ -1942,8 +2239,9 @@ export class Engine {
     if (!a) {
       const me: PlayerInfo | undefined = s.players.find((p) => p.id === s.myId);
       if (!me) return;
-      a = new Avatar(me.id, me.name, me.color, { skin: me.skin, noLabel: true });
+      a = new Avatar(me.id, me.name, me.color, { skin: me.skin, noLabel: true, sword: me.sword });
       a.setCrown(me.crown);
+      a.setShield(me.shield);
       a.followRate = Infinity;
       this.selfAvatar = a;
       this.scene.add(a.group);
@@ -2227,6 +2525,37 @@ export class Engine {
     for (const { group } of this.bags.values()) {
       group.rotation.y += dt * 1.5;
       group.position.y = group.userData.baseY + Math.sin(t / 300) * 0.08;
+    }
+    for (const { group, info } of this.chests.values()) {
+      group.position.y = info.y + Math.max(0, Math.sin(t / 260 + info.id)) * 0.06;
+    }
+    for (const p of this.projs.values()) {
+      if (p.kind === "tnt" && p.vel.lengthSq() < 1e-6) {
+        // Primed: flashes white faster and faster.
+        const lit = Math.sin(t / 70) > 0;
+        p.group.traverse((o) => {
+          if (o instanceof THREE.Mesh) for (const m of o.material as THREE.MeshLambertMaterial[]) m.emissive?.setRGB(lit ? 0.8 : 0, lit ? 0.8 : 0, lit ? 0.8 : 0);
+        });
+        continue;
+      }
+      p.group.position.addScaledVector(p.vel, dt);
+      p.vel.y -= THROW[p.kind].gravity * dt;
+      p.group.rotation.x += dt * 8;
+      p.group.rotation.z += dt * 5;
+    }
+    if (this.pointMarks.length) {
+      this.pointMarks = this.pointMarks.filter((p) => {
+        if (t < p.until) {
+          const k = Math.min(1, (p.until - t) / 800);
+          p.group.traverse((o) => {
+            if (o instanceof THREE.Mesh) (o.material as THREE.MeshBasicMaterial).opacity = 0.55 * k;
+          });
+          p.group.children[1].scale.setScalar(1 + 0.15 * Math.sin(t / 150));
+          return true;
+        }
+        this.disposeGroup(p.group);
+        return false;
+      });
     }
     this.particles.update(stopped ? 0 : dt);
     this.updateCelebration(t, invisible);

@@ -2,9 +2,35 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
-import { BUFFS, HILL_TARGET, HOT_STREAK, MAX_HP, MAX_PLAYERS, MIN_PLAYERS, MODES, MODE_IDS, PLAYER_COLORS, SKINS, SKIN_IDS, buffAt, buffCount, buffIndexAt, roundClock } from "@/game/shared";
-import type { BuffId, GameMode, PlayerInfo, SkinId, TrainStats } from "@/game/shared";
-import { Engine, SENS_MAX, SENS_MIN } from "@/game/client/engine";
+import {
+  BOT_FILL,
+  BUFFS,
+  EMOTES,
+  EMOTE_IDS,
+  HILL_TARGET,
+  HOT_STREAK,
+  ITEMS,
+  ITEM_IDS,
+  MAX_HP,
+  MAX_PLAYERS,
+  MODES,
+  MODE_IDS,
+  PLAYER_COLORS,
+  SHIELD_MS,
+  SKINS,
+  SKIN_IDS,
+  SWORDS,
+  SWORD_KINDS,
+  buffAt,
+  buffCount,
+  buffIndexAt,
+  normalizeRoomCode,
+  roundClock,
+  unlockText,
+  unlocked,
+} from "@/game/shared";
+import type { BuffId, EmoteId, GameMode, PlayerInfo, ProfileInfo, SkinId, SwordKind, TrainStats } from "@/game/shared";
+import { Engine, SENS_MAX, SENS_MIN, loadToken, saveToken } from "@/game/client/engine";
 import { createStore, initialUi } from "@/game/client/store";
 import type { UiState } from "@/game/client/store";
 import { hairFor, skinFaceUrl } from "@/game/client/skins";
@@ -16,11 +42,16 @@ const NAME_KEY = "pvp-name";
 
 /** The engine calls this UI relies on; typed locally so the HUD does not depend on the engine's other members. */
 type EngineApi = {
-  join(name: string): void;
+  join(name: string, room: string | null): void;
+  switchRoom(room: string | null): void;
   reconnect(): void;
   toggleMute(): void;
   setSens(v: number): void;
-  setLook(color: string, skin: SkinId): void;
+  setLook(color: string, skin: SkinId, sword?: SwordKind): void;
+  useItem(i: number): void;
+  emote(e: EmoteId): void;
+  setQuickChat(open: boolean): void;
+  setProfile(open: boolean): void;
   setWardrobe(open: boolean): void;
   setHelp(open: boolean): void;
   answerDuel(accept: boolean): void;
@@ -31,7 +62,11 @@ type EngineApi = {
 interface HudActions {
   toggleMute(): void;
   setSens(v: number): void;
-  setLook(color: string, skin: SkinId): void;
+  setLook(color: string, skin: SkinId, sword?: SwordKind): void;
+  switchRoom(room: string | null): void;
+  emote(e: EmoteId): void;
+  setQuickChat(open: boolean): void;
+  setProfile(open: boolean): void;
   setWardrobe(open: boolean): void;
   setHelp(open: boolean): void;
   answerDuel(accept: boolean): void;
@@ -81,7 +116,10 @@ const CONTROLS: [string, string][] = [
   ["ПКМ", "поставить землю"],
   ["Прыжок + удар", "крит ×1.5"],
   ["Q", "выстрел (баф «Луки»)"],
+  ["1–5", "предметы из сундуков"],
   ["1 / 2 / 3", "голос за баф (выбывшим)"],
+  ["G", "быстрый чат и эмоции"],
+  ["P", "профиль, задания, комнаты"],
   ["V", "вид от 1-го / 3-го лица"],
   ["T", "смотреть арену / в лобби"],
   ["E", "гардероб"],
@@ -121,22 +159,37 @@ function SensSlider({ value, onChange }: { value: number; onChange: (v: number) 
   );
 }
 
-function JoinScreen({ onJoin, sens, onSens }: { onJoin: (name: string) => void; sens: number; onSens: (v: number) => void }) {
+/** Room code from the page's address (?room=ABCDE): a friend's invitation link. */
+function invitedRoom(): string | null {
+  try {
+    return normalizeRoomCode(new URL(location.href).searchParams.get("room"));
+  } catch {
+    return null;
+  }
+}
+
+function JoinScreen({ onJoin, sens, onSens }: { onJoin: (name: string, room: string | null) => void; sens: number; onSens: (v: number) => void }) {
   const [name, setName] = useState(() => localStorage.getItem(NAME_KEY) ?? "");
+  const [invite] = useState(invitedRoom);
+  const [code, setCode] = useState("");
+  const go = (room: string | null) => {
+    const n = name.trim().slice(0, 16);
+    localStorage.setItem(NAME_KEY, n);
+    onJoin(n, room);
+  };
+  const typed = normalizeRoomCode(code);
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-black/35 p-4">
       <Panel className="max-h-full w-full max-w-xl overflow-y-auto">
         <h1 className="pvp-title text-center text-3xl text-[#ffde59] md:text-4xl">БЛОК-АРЕНА</h1>
         <p className="mt-2 text-center text-white/85">
-          PvP до последнего выжившего · {MIN_PLAYERS}–{MAX_PLAYERS} игроков
+          PvP до последнего выжившего · до {MAX_PLAYERS} игроков · боты, если людей мало
         </p>
         <form
           className="mt-5 flex gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            const n = name.trim().slice(0, 16);
-            localStorage.setItem(NAME_KEY, n);
-            onJoin(n);
+            go(invite);
           }}
         >
           <input
@@ -148,14 +201,39 @@ function JoinScreen({ onJoin, sens, onSens }: { onJoin: (name: string) => void; 
             aria-label="Ник"
             className="pvp-input flex-1"
           />
-          <McButton tone="green">Играть</McButton>
+          <McButton tone="green">{invite ? `В комнату ${invite}` : "Играть"}</McButton>
         </form>
+        {invite && (
+          <p className="mt-2 text-sm text-white/75">
+            Вас пригласили в приватную комнату <b className="text-[#ffde59]">{invite}</b>.{" "}
+            <button type="button" className="underline" onClick={() => go(null)}>
+              Играть на общем сервере
+            </button>
+          </p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-white/75">С друзьями:</span>
+          <McButton onClick={() => go("new")}>Создать комнату</McButton>
+          <input
+            value={code}
+            maxLength={5}
+            onChange={(e) => setCode(e.target.value.toUpperCase())}
+            placeholder="КОД"
+            aria-label="Код комнаты"
+            className="pvp-input w-24 text-center uppercase"
+          />
+          <McButton disabled={!typed} onClick={() => typed && go(typed)}>
+            Войти
+          </McButton>
+        </div>
         <div className="mt-3">
           <SensSlider value={sens} onChange={onSens} />
         </div>
         <ul className="mt-5 space-y-1 text-sm text-white/80">
           <li>• Между раундами ты ходишь по лобби: тренируйся на скелетах, стреляй в тире, бегай паркур, дуэлься, меняй облик в гардеробе.</li>
-          <li>• Раунд стартует сам: через 60 с, когда в лобби двое, или через 10 с, если больше половины встали в зелёный круг у портала.</li>
+          <li>• Раунд стартует сам: через 60 с, когда в лобби двое, или через 10 с, если больше половины встали в зелёный круг у портала. Если людей меньше {BOT_FILL}, раунд добирают боты — можно играть даже одному.</li>
+          <li>• Каждый раунд — новая карта: холмы, руины, лес, мосты. На ней появляются сундуки с предметами (клавиши 1–5).</li>
+          <li>• За раунды растёт уровень, за победы открываются скины и мечи, каждый день — новые задания (P). Прогресс хранится в этом браузере.</li>
           <li>• Режим выбирают голосованием — встань на одну из 9 цветных площадок.</li>
           <li>• На арене у каждого 10 блоков земли и меч. Убитый теряет всё. Удар в падении — крит ×1.5, строить можно до 20 блоков.</li>
           <li>• Выбыл — смотришь до конца раунда. Потом все возвращаются в лобби, победитель получает корону.</li>
@@ -314,6 +392,8 @@ function playerTags(ui: UiState, p: PlayerInfo): string {
   if (p.size < 0.8) tags.push("⬇");
   if (ui.bounty === p.id) tags.push("🎯");
   if (ui.bomb?.holder === p.id) tags.push("💣");
+  if (p.shield) tags.push("🛡️");
+  if (p.bot) tags.push("🤖");
   return tags.join("");
 }
 
@@ -332,7 +412,10 @@ function Scoreboard({ ui }: { ui: UiState }) {
           style={teams && p.team !== null ? { borderLeft: `3px solid ${teams[p.team].color}` } : undefined}
         >
           <span className="h-2.5 w-2.5 shrink-0" style={{ background: p.color }} />
-          <span className="flex-1 truncate">{p.name}</span>
+          <span className="flex-1 truncate">
+            {p.level > 0 && <span className="mr-1 text-[11px] text-[#7dd3fc]">{p.level}</span>}
+            {p.name}
+          </span>
           <span>{playerTags(ui, p)}</span>
           {ui.mode === "koth" && <span className="text-[#fbbf24]">★{p.score}</span>}
           {p.kills >= HOT_STREAK && !respawn ? <span className="text-orange-400">🔥{p.kills}</span> : <span className="text-white/70">⚔{p.kills}</span>}
@@ -597,7 +680,7 @@ function EndScreen({ ui, now }: { ui: UiState; now: number }) {
                   <td className="py-0.5 pl-1 text-white/60">{i + 1}</td>
                   <td className="max-w-0 truncate">
                     <span className="mr-1.5 inline-block h-2.5 w-2.5" style={{ background: r.color }} />
-                    {r.name}
+                    {r.bot ? `🤖 ${r.name}` : r.name}
                   </td>
                   <td className="text-right">{r.kills}</td>
                   <td className="text-right">{Math.round(r.damage)}</td>
@@ -608,7 +691,251 @@ function EndScreen({ ui, now }: { ui: UiState; now: number }) {
             </tbody>
           </table>
         )}
+        {ui.reward && now - ui.reward.at < ui.timings.endMs + 1000 && <RewardPanel r={ui.reward} />}
         <div className="mt-3 text-sm text-white/60">Возврат в лобби через {Math.max(0, Math.ceil(left / 1000))} с</div>
+      </Panel>
+    </div>
+  );
+}
+
+function RewardPanel({ r }: { r: NonNullable<UiState["reward"]> }) {
+  return (
+    <div className="mt-3 bg-black/35 px-3 py-2 text-left text-sm">
+      <div className="flex items-baseline justify-between">
+        <b className="text-[#7dd3fc]">+{r.xp} опыта</b>
+        <span className={r.levelUp ? "pvp-announce-in text-[#ffde59]" : "text-white/70"}>{r.levelUp ? `Новый уровень: ${r.level}!` : `Уровень ${r.level}`}</span>
+      </div>
+      <div className="mt-1 grid grid-cols-2 gap-x-3 text-xs text-white/75">
+        {r.lines.map(([why, xp], i) => (
+          <div key={i} className="flex justify-between gap-2">
+            <span className="truncate">{why}</span>
+            <span className="tabular-nums text-[#7dd3fc]">+{xp}</span>
+          </div>
+        ))}
+      </div>
+      {r.unlocked.length > 0 && <div className="mt-1 text-[#ffde59]">Открыто: {r.unlocked.join(", ")} — загляни в гардероб!</div>}
+    </div>
+  );
+}
+
+/** Items from chests: keys 1–5; a raised shield counts down over its slot. */
+function ItemBar({ ui, now }: { ui: UiState; now: number }) {
+  if (!ui.items.some((n) => n > 0) && ui.shieldUntil <= now) return null;
+  return (
+    <div className="flex gap-1">
+      {ITEM_IDS.map((id, i) => {
+        const n = ui.items[i] ?? 0;
+        const shield = id === "shield" && ui.shieldUntil > now;
+        return (
+          <div key={id} className={`pvp-slot pvp-item relative ${n > 0 || shield ? "" : "opacity-35"}`} title={`${ITEMS[id].title}: ${ITEMS[id].description}`}>
+            <span className="absolute left-1 top-0.5 text-[10px] text-white/70">{i + 1}</span>
+            <span className="text-2xl leading-none">{ITEMS[id].icon}</span>
+            {n > 0 && <span className="pvp-outline absolute bottom-0 right-1 text-sm tabular-nums">{n}</span>}
+            {shield && <span className="absolute inset-x-0 bottom-0 h-1 bg-[#93c5fd]" style={{ width: `${Math.max(0, (ui.shieldUntil - now) / SHIELD_MS) * 100}%` }} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function QuickChat({ onEmote, onClose }: { onEmote: (e: EmoteId) => void; onClose: () => void }) {
+  return (
+    <div className="pointer-events-auto absolute bottom-28 left-3 w-52">
+      <Panel className="!p-2 text-sm">
+        <div className="mb-1 flex items-center justify-between text-xs text-white/70">
+          <span>Быстрый чат</span>
+          <button type="button" onClick={onClose} aria-label="Закрыть">
+            <span className="pvp-key">G</span>
+          </button>
+        </div>
+        {EMOTE_IDS.map((e, i) => (
+          <button key={e} type="button" onClick={() => onEmote(e)} className="flex w-full items-center gap-2 px-1 py-0.5 text-left hover:bg-white/10">
+            <span className="pvp-key">{i + 1}</span>
+            <span>{EMOTES[e].icon}</span>
+            <span>{EMOTES[e].label}</span>
+          </button>
+        ))}
+      </Panel>
+    </div>
+  );
+}
+
+function ChatLog({ ui, now }: { ui: UiState; now: number }) {
+  const lines = ui.chat.filter((c) => now - c.at < 7000);
+  if (!lines.length) return null;
+  return (
+    <div className="pointer-events-none absolute bottom-28 left-3 space-y-0.5 text-sm">
+      {lines.map((c) => (
+        <div key={c.key} className="pvp-outline bg-black/40 px-2 py-0.5">
+          <b style={{ color: c.color }}>{c.name}</b>: {EMOTES[c.e].icon} {EMOTES[c.e].text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RoomBadge({ room, onLeave }: { room: string; onLeave: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    const url = new URL(location.href);
+    url.searchParams.set("room", room);
+    void navigator.clipboard?.writeText(url.toString()).then(() => setCopied(true));
+  };
+  return (
+    <div className="pointer-events-auto absolute left-3 top-12 flex items-center gap-1.5 bg-black/45 px-2 py-1 text-sm">
+      Комната <b className="tracking-widest text-[#ffde59]">{room}</b>
+      <button type="button" className="underline" onClick={copy}>
+        {copied ? "ссылка скопирована" : "скопировать ссылку"}
+      </button>
+      ·
+      <button type="button" className="underline" onClick={onLeave}>
+        выйти
+      </button>
+    </div>
+  );
+}
+
+function Lock({ u, p }: { u: { wins?: number; level?: number } | undefined; p: ProfileInfo | null }) {
+  const st = { wins: p?.wins ?? 0, level: p?.level ?? 1 };
+  if (unlocked(u, st)) return null;
+  return <span className="block text-[10px] text-white/60">🔒 {unlockText(u)}</span>;
+}
+
+function ProfileOverlay({ ui, actions }: { ui: UiState; actions: HudActions }) {
+  const p = ui.profile;
+  const [code, setCode] = useState("");
+  const [tokenShown, setTokenShown] = useState(false);
+  const [moved, setMoved] = useState<string | null>(null);
+  const typed = normalizeRoomCode(code);
+  const st = { wins: p?.wins ?? 0, level: p?.level ?? 1 };
+  return (
+    <div className="pointer-events-auto absolute inset-0 flex items-center justify-center bg-black/55 p-4">
+      <Panel className="pvp-panel-solid flex max-h-full w-full max-w-3xl flex-col !p-4">
+        <h2 className="pvp-title text-center text-2xl text-[#ffde59]">ПРОФИЛЬ</h2>
+        <div className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1 text-sm">
+          {p ? (
+            <>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="pvp-title text-xl text-[#7dd3fc]">Уровень {p.level}</span>
+                <div className="h-3 min-w-40 flex-1 bg-black/50">
+                  <div className="h-full bg-[#7dd3fc]" style={{ width: `${(p.into / p.next) * 100}%` }} />
+                </div>
+                <span className="tabular-nums text-white/75">
+                  {p.into}/{p.next} опыта
+                </span>
+              </div>
+              <div className="mt-1 text-white/75">
+                Побед <b className="text-white">{p.wins}</b> · раундов <b className="text-white">{p.rounds}</b> · убийств <b className="text-white">{p.kills}</b>
+              </div>
+              <div className="mt-3 grid gap-4 md:grid-cols-2">
+                <div>
+                  <div className="text-[#ffde59]">Задания на сегодня</div>
+                  <ul className="mt-1 space-y-1.5">
+                    {p.quests.map((q) => (
+                      <li key={q.id} className={q.done ? "text-[#7CFC00]" : ""}>
+                        <div className="flex justify-between gap-2">
+                          <span>
+                            {q.done ? "✔ " : ""}
+                            {q.title}
+                          </span>
+                          <span className="text-xs text-[#7dd3fc]">+{q.xp}</span>
+                        </div>
+                        <div className="mt-0.5 h-1.5 bg-black/50">
+                          <div className="h-full bg-[#7CFC00]" style={{ width: `${(q.progress / q.target) * 100}%` }} />
+                        </div>
+                        <div className="text-[11px] text-white/60">
+                          {q.progress}/{q.target}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-3 text-[#ffde59]">Награды</div>
+                  <ul className="mt-1 grid grid-cols-2 gap-x-3 text-xs">
+                    {[...SKIN_IDS.filter((id) => SKINS[id].unlock).map((id) => [`Скин «${SKINS[id].title}»`, SKINS[id].unlock] as const), ...SWORD_KINDS.filter((k) => SWORDS[k].unlock).map((k) => [`${SWORDS[k].title} меч`, SWORDS[k].unlock] as const)].map(([title, u]) => (
+                      <li key={title} className={unlocked(u, st) ? "text-[#7CFC00]" : "text-white/60"}>
+                        {unlocked(u, st) ? "✔" : "🔒"} {title}
+                        {!unlocked(u, st) && <span className="text-white/45"> — {unlockText(u)}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <div className="text-[#ffde59]">Лучшие за неделю</div>
+                  {ui.weekly && ui.weekly.rows.length ? (
+                    <table className="mt-1 w-full text-left text-xs tabular-nums">
+                      <thead>
+                        <tr className="text-white/55">
+                          <th className="w-5">#</th>
+                          <th>Игрок</th>
+                          <th className="text-right">Опыт</th>
+                          <th className="text-right">Победы</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ui.weekly.rows.map((r, i) => (
+                          <tr key={r.name} className="odd:bg-black/20">
+                            <td className="text-white/60">{i + 1}</td>
+                            <td className="max-w-0 truncate">
+                              <span className="mr-1 text-[#7dd3fc]">{r.level}</span>
+                              {r.name}
+                            </td>
+                            <td className="text-right">{r.xp}</td>
+                            <td className="text-right">{r.wins}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="mt-1 text-white/60">На этой неделе ещё никто не играл</div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="text-white/70">Профиль загружается…</div>
+          )}
+          <div className="mt-4 text-[#ffde59]">Приватная комната</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            {ui.room ? (
+              <>
+                Ты в комнате <b className="tracking-widest">{ui.room}</b>
+                <McButton onClick={() => actions.switchRoom(null)}>На общий сервер</McButton>
+              </>
+            ) : (
+              <McButton onClick={() => actions.switchRoom("new")}>Создать комнату</McButton>
+            )}
+            <input value={code} maxLength={5} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="КОД" aria-label="Код комнаты" className="pvp-input w-24 text-center uppercase" />
+            <McButton disabled={!typed} onClick={() => typed && actions.switchRoom(typed)}>
+              Войти по коду
+            </McButton>
+          </div>
+          <div className="mt-4 text-[#ffde59]">Перенос прогресса</div>
+          <p className="mt-1 text-xs text-white/70">
+            Прогресс привязан к секретному коду этого браузера, а не к нику. Чтобы играть с другого устройства, вставь там этот код. Никому его не показывай.
+          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            {tokenShown ? <code className="select-all break-all bg-black/50 px-1 text-xs">{loadToken()}</code> : <McButton onClick={() => setTokenShown(true)}>Показать мой код</McButton>}
+            <input onChange={(e) => setMoved(e.target.value)} placeholder="код с другого устройства" aria-label="Код прогресса" className="pvp-input min-w-0 flex-1 text-xs" />
+            <McButton
+              disabled={!moved}
+              onClick={() => {
+                if (moved && saveToken(moved)) location.reload();
+                else setMoved(null);
+              }}
+            >
+              Применить
+            </McButton>
+          </div>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <span className="text-xs text-white/60">
+            <span className="pvp-key">P</span> / <span className="pvp-key">Esc</span> — закрыть
+          </span>
+          <McButton tone="green" onClick={() => actions.setProfile(false)}>
+            Закрыть
+          </McButton>
+        </div>
       </Panel>
     </div>
   );
@@ -728,6 +1055,11 @@ function HubStatus({ ui, now }: { ui: UiState; now: number }) {
       <div className="pvp-title text-sm text-[#ffde59] md:text-base">
         {hub.startAt !== null ? `Старт через ${fmt(hub.startAt - now)}` : `Ждём игроков: нужно ещё ${Math.max(0, hub.need - hub.active)}`}
       </div>
+      {hub.bots > hub.active && (
+        <div className="text-xs text-white/70">
+          Людей меньше {hub.bots} — раунд доберут боты 🤖
+        </div>
+      )}
       <div className="mt-1.5 text-sm text-white/90">
         Готовы{" "}
         <b className="text-[#7CFC00]">
@@ -878,7 +1210,8 @@ function InvitePrompt({ ui, onAnswer }: { ui: UiState; onAnswer: (accept: boolea
   );
 }
 
-function Wardrobe({ look, myId, onLook, onClose }: { look: UiState["look"]; myId: number | null; onLook: (color: string, skin: SkinId) => void; onClose: () => void }) {
+function Wardrobe({ look, myId, profile, onLook, onClose }: { look: UiState["look"]; myId: number | null; profile: ProfileInfo | null; onLook: (color: string, skin: SkinId, sword?: SwordKind) => void; onClose: () => void }) {
+  const st = { wins: profile?.wins ?? 0, level: profile?.level ?? 1 };
   // Each skin's face in the chosen colour (Steve's hair follows the player's id, as in game).
   const faces = useMemo(() => Object.fromEntries(SKIN_IDS.map((id) => [id, skinFaceUrl(id, look.color, hairFor(myId ?? 0))])), [look.color, myId]);
   return (
@@ -895,7 +1228,7 @@ function Wardrobe({ look, myId, onLook, onClose }: { look: UiState["look"]; myId
                 type="button"
                 aria-label={`Цвет ${c}`}
                 aria-pressed={on}
-                onClick={() => onLook(c, look.skin)}
+                onClick={() => onLook(c, look.skin, look.sword)}
                 className={`pvp-swatch ${on ? "pvp-swatch-on" : ""}`}
                 style={{ background: c }}
               />
@@ -905,9 +1238,36 @@ function Wardrobe({ look, myId, onLook, onClose }: { look: UiState["look"]; myId
         <div className="mt-4 text-sm text-white/75">Облик</div>
         <div className="mt-2 grid grid-cols-3 gap-2">
           {SKIN_IDS.map((id) => (
-            <button key={id} type="button" aria-pressed={look.skin === id} onClick={() => onLook(look.color, id)} className={`pvp-chip pvp-skin-chip ${look.skin === id ? "pvp-chip-on" : ""}`}>
+            <button
+              key={id}
+              type="button"
+              aria-pressed={look.skin === id}
+              disabled={!unlocked(SKINS[id].unlock, st)}
+              onClick={() => onLook(look.color, id)}
+              className={`pvp-chip pvp-skin-chip ${look.skin === id ? "pvp-chip-on" : ""} ${unlocked(SKINS[id].unlock, st) ? "" : "opacity-50"}`}
+            >
               <span className="pvp-skin-face" style={{ backgroundImage: `url(${faces[id]})` }} aria-hidden />
-              {SKINS[id].title}
+              <span>
+                {SKINS[id].title}
+                <Lock u={SKINS[id].unlock} p={profile} />
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="mt-4 text-sm text-white/75">Меч</div>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          {SWORD_KINDS.map((k) => (
+            <button
+              key={k}
+              type="button"
+              aria-pressed={look.sword === k}
+              disabled={!unlocked(SWORDS[k].unlock, st)}
+              onClick={() => onLook(look.color, look.skin, k)}
+              className={`pvp-chip ${look.sword === k ? "pvp-chip-on" : ""} ${unlocked(SWORDS[k].unlock, st) ? "" : "opacity-50"}`}
+            >
+              <span className="mr-1 inline-block h-2.5 w-2.5" style={{ background: SWORD_COLORS[k] }} />
+              {SWORDS[k].title}
+              <Lock u={SWORDS[k].unlock} p={profile} />
             </button>
           ))}
         </div>
@@ -924,7 +1284,15 @@ function Wardrobe({ look, myId, onLook, onClose }: { look: UiState["look"]; myId
   );
 }
 
+const SWORD_COLORS: Record<SwordKind, string> = { wood: "#a07a45", stone: "#8a8a8a", iron: "#d8d8d8", gold: "#facc15", diamond: "#4ee6d8", netherite: "#4a3f45" };
+
 const HELP_ITEMS: [string, string][] = [
+  ["Карты", "Каждый раунд арена генерируется заново: холмы, руины, лес или мосты. Прячься за стенами, занимай высоты, сталкивай с уступов у края."],
+  ["Сундуки", "Подойди к сундуку, чтобы открыть. Клавиши 1–5: золотое яблоко (+4 сердца), эндер-жемчуг (бросок и телепорт), щит (8 с блокирует удар), снежки (отталкивают), TNT (взрыв через 2,5 с)."],
+  ["Боты", `Если людей меньше ${BOT_FILL}, раунд добирают боты 🤖 — играть можно и одному. Победа над одними ботами даёт половину опыта.`],
+  ["Прогресс", "Опыт за раунды, уровни, ежедневные задания и таблица недели — клавиша P. Новые скины и мечи открываются за победы и уровни. Прогресс привязан к этому браузеру, а не к нику."],
+  ["Комнаты", "В профиле (P) создай приватную комнату и отправь друзьям ссылку или код из 5 символов."],
+  ["Быстрый чат", "G и цифра: gg, ха-ха, помахать, показать на точку под прицелом и другие."],
   ["Зелёный круг у портала", "Встань в него: когда в круге больше половины игроков, раунд начнётся через 10 с. Иначе старт через 60 с после того, как в лобби двое."],
   ["Цветные площадки", "Голосование за режим. Встань на площадку — режим с наибольшим числом голосов сыграют в раунде."],
   ["Спринт", "Дважды быстро нажми W, как в Minecraft. Бег быстрее на 30%, с прыжками ещё быстрее. Спринт сбивается, если отпустить W, врезаться в стену или ударить. Удар с разбега отбрасывает сильнее, но не критует."],
@@ -999,7 +1367,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
   const playing = ui.phase === "playing" || ui.phase === "countdown";
   const inRound = arena && playing;
   const spectating = inRound && (ui.watching || !ui.alive);
-  const overlay = ui.wardrobe || ui.help;
+  const overlay = ui.wardrobe || ui.help || ui.profileOpen;
   const duelActive = ui.duel?.state === "countdown" || ui.duel?.state === "fight";
   const showCrosshair = !overlay && (arena ? inRound && ui.alive && !ui.watching : true);
   const showLockHint = !ui.locked && !overlay && (arena ? inRound && !(spectating && ui.vote) : true);
@@ -1017,8 +1385,14 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
             <HubActivity ui={ui} now={now} />
           </div>
           <div className="pointer-events-none absolute left-3 top-3 bg-black/45 px-2 py-1 text-sm">
-            <span className="pvp-key">H</span> помощь
+            <span className="pvp-key">H</span> помощь · <span className="pvp-key">P</span> профиль{ui.profile ? ` (ур. ${ui.profile.level})` : ""} · <span className="pvp-key">G</span> чат
           </div>
+          {ui.room && <RoomBadge room={ui.room} onLeave={() => actions.switchRoom(null)} />}
+          {ui.reward && ui.phase === "lobby" && now - ui.reward.at < ui.timings.endMs + 9000 && (
+            <div className="pointer-events-none absolute right-3 top-3 w-72">
+              <RewardPanel r={ui.reward} />
+            </div>
+          )}
           {ui.train && <TrainPanel t={ui.train} />}
           <HubCenter ui={ui} now={now} />
           {ui.hint && now - ui.hint.at < 3000 && (
@@ -1076,10 +1450,13 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
               🏹 <b className="tabular-nums">{ui.arrows}</b> · <span className="pvp-key">Q</span> выстрел
             </div>
           )}
-          <div className="pvp-slot flex items-center gap-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={dirtIcon} alt="" className="h-9 w-9 [image-rendering:pixelated]" />
-            <span className="pvp-outline text-2xl tabular-nums">{ui.dirt}</span>
+          <div className="flex items-end gap-2">
+            <div className="pvp-slot flex items-center gap-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={dirtIcon} alt="" className="h-9 w-9 [image-rendering:pixelated]" />
+              <span className="pvp-outline text-2xl tabular-nums">{ui.dirt}</span>
+            </div>
+            <ItemBar ui={ui} now={now} />
           </div>
         </div>
       )}
@@ -1112,8 +1489,11 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
         <span className="text-xs text-white/70">M</span>
       </button>
 
+      <ChatLog ui={ui} now={now} />
+      {ui.quickChat && !overlay && <QuickChat onEmote={actions.emote} onClose={() => actions.setQuickChat(false)} />}
       {arena && ui.phase === "ended" && <EndScreen ui={ui} now={now} />}
-      {ui.wardrobe && <Wardrobe look={ui.look} myId={ui.myId} onLook={actions.setLook} onClose={() => actions.setWardrobe(false)} />}
+      {ui.wardrobe && <Wardrobe look={ui.look} myId={ui.myId} profile={ui.profile} onLook={actions.setLook} onClose={() => actions.setWardrobe(false)} />}
+      {ui.profileOpen && <ProfileOverlay ui={ui} actions={actions} />}
       {ui.help && <Help onClose={() => actions.setHelp(false)} sens={ui.sens} onSens={actions.setSens} />}
     </>
   );
@@ -1139,7 +1519,11 @@ export default function PvpGame() {
   const actions: HudActions = {
     toggleMute: () => api()?.toggleMute(),
     setSens: (v) => api()?.setSens(v),
-    setLook: (color, skin) => api()?.setLook(color, skin),
+    setLook: (color, skin, sword) => api()?.setLook(color, skin, sword),
+    switchRoom: (room) => api()?.switchRoom(room),
+    emote: (e) => api()?.emote(e),
+    setQuickChat: (open) => api()?.setQuickChat(open),
+    setProfile: (open) => api()?.setProfile(open),
     setWardrobe: (open) => api()?.setWardrobe(open),
     setHelp: (open) => api()?.setHelp(open),
     answerDuel: (accept) => api()?.answerDuel(accept),
@@ -1149,7 +1533,7 @@ export default function PvpGame() {
   return (
     <div className="pvp-root fixed inset-0 select-none overflow-hidden bg-black text-white">
       <div ref={hostRef} className="absolute inset-0" />
-      {ui.conn === "idle" && <JoinScreen onJoin={(name) => api()?.join(name)} sens={ui.sens} onSens={actions.setSens} />}
+      {ui.conn === "idle" && <JoinScreen onJoin={(name, room) => api()?.join(name, room)} sens={ui.sens} onSens={actions.setSens} />}
       {ui.conn === "connecting" && (
         <div className="absolute inset-0 flex items-center justify-center">
           <Panel className="text-xl">Подключение к серверу…</Panel>
@@ -1163,6 +1547,11 @@ export default function PvpGame() {
             <McButton className="mt-4" onClick={() => api()?.reconnect()}>
               Переподключиться
             </McButton>
+            {ui.closeReason?.startsWith("Комнат") && (
+              <McButton className="ml-2 mt-4" onClick={() => api()?.switchRoom(null)}>
+                На общий сервер
+              </McButton>
+            )}
           </Panel>
         </div>
       )}

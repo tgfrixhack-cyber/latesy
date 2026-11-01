@@ -1,6 +1,6 @@
 import * as THREE from "three";
-import { EYE_HEIGHT, MAX_HP, type MobKind, type SkinId } from "../shared";
-import { SWING_MS, attackPose, createSwordModel, thirdPersonMatrix } from "./sword";
+import { EYE_HEIGHT, MAX_HP, SKIN_BASE, type MobKind, type SkinId, type SwordKind } from "../shared";
+import { SWING_MS, attackPose, createSwordModel, swordStyle, thirdPersonMatrix } from "./sword";
 import { INFLATE, faceRect, hairFor, partSize, skinSheet, tint } from "./skins";
 import type { Layer, Part, Side } from "./skins";
 import { labelTexture } from "./textures";
@@ -43,7 +43,14 @@ export interface AvatarOpts {
   labelColor?: string;
   /** No name tag (your own model in third person). */
   noLabel?: boolean;
+  /** The sword this player holds; the local style's kind by default. */
+  sword?: SwordKind;
 }
+
+/** Quick-chat gestures of the left arm, and how long they last. */
+export type Gesture = "wave" | "point";
+const GESTURE_MS = 1800;
+const SAY_MS = 3200;
 
 function box(w: number, h: number, d: number, mat: THREE.Material | THREE.Material[]) {
   const g = new THREE.BoxGeometry(w * PX, h * PX, d * PX);
@@ -81,7 +88,7 @@ function skinBox(part: Part, layer: Layer, thin: boolean, grow: number) {
 }
 
 /** A face of the TNT block on the head: red sticks with a white band, or the tan top. */
-function tntTexture(cap: boolean) {
+export function tntTexture(cap: boolean) {
   const c = document.createElement("canvas");
   c.width = c.height = 32;
   const g = c.getContext("2d")!;
@@ -189,6 +196,13 @@ export class Avatar {
   private scaleNow = 1;
   private ticked = false;
   private zombie = false;
+  private base: SkinId;
+  readonly swordKind: SwordKind;
+  private shield: THREE.Group | null = null;
+  private shieldOn = false;
+  private gesture: { kind: Gesture; at: number } | null = null;
+  private bubble: THREE.Sprite | null = null;
+  private bubbleAt = 0;
   /** Meshes that cast a shadow, switched off while their player is invisible. */
   private shadowCasters: THREE.Object3D[] | null = null;
   private zombieOrig = new Map<THREE.MeshLambertMaterial, THREE.Color>();
@@ -216,6 +230,8 @@ export class Avatar {
     this.mob = opts.mob;
     this.showLabel = !opts.noLabel;
     this.skin = opts.mob ? "skeleton" : (opts.skin ?? "steve");
+    this.base = SKIN_BASE[this.skin] ?? this.skin;
+    this.swordKind = opts.sword ?? swordStyle.kind;
     this.labelCol = opts.labelColor ?? color;
     const weapon = opts.weapon ?? (opts.mob ? MOB_WEAPON[opts.mob] : "sword");
     const hair = hairFor(id);
@@ -252,9 +268,9 @@ export class Avatar {
     this.headTop = headTop;
     this.buildCrown(headTop);
     this.head.add(this.crown, this.headgear);
-    if (this.skin === "robot") this.buildAntenna();
-    if (this.skin === "knight") this.buildPlume(headTop);
-    if (this.skin === "ninja") this.buildTails(8 + grow.head);
+    if (this.base === "robot") this.buildAntenna();
+    if (this.base === "knight") this.buildPlume(headTop);
+    if (this.base === "ninja") this.buildTails(8 + grow.head);
 
     const body = part("body", grow.body);
     body.position.y = 24 * PX;
@@ -272,7 +288,7 @@ export class Avatar {
     this.legR.position.set(2 * PX, 12 * PX, 0);
 
     if (weapon === "sword") {
-      const { group } = createSwordModel(undefined, { transparent: true });
+      const { group } = createSwordModel({ ...swordStyle, kind: this.swordKind }, { transparent: true });
       group.matrixAutoUpdate = false;
       group.matrix.copy(SWORD_IN_HAND);
       this.armR.add(group);
@@ -602,6 +618,24 @@ export class Avatar {
       this.armR.rotation.x = ZOMBIE_ARMS - lift;
       this.armL.rotation.x = ZOMBIE_ARMS + lift;
     }
+    const gt = this.gesture ? (now - this.gesture.at) / GESTURE_MS : 1;
+    if (this.gesture && gt < 1) {
+      const ease = Math.min(1, gt * 6, (1 - gt) * 6);
+      if (this.gesture.kind === "wave") {
+        this.armL.rotation.set(0, 0, -(2.5 + Math.sin(now / 90) * 0.35) * ease);
+      } else {
+        this.armL.rotation.set(-Math.PI / 2 * ease + this.pitch * ease, 0, 0);
+      }
+    } else if (this.shieldOn && !this.bow) {
+      // Shield up in front of the body.
+      this.armL.rotation.set(-0.9, 0.5, 0);
+    }
+    if (this.bubble) {
+      const age = now - this.bubbleAt;
+      this.bubble.visible = age < SAY_MS;
+      this.bubble.material.opacity = Math.min(1, (SAY_MS - age) / 400);
+      this.bubble.position.y = this.label.position.y + 0.45 + Math.min(1, age / 150) * 0.05;
+    }
 
     this.group.position.copy(this.pos);
     this.group.rotation.y = this.yaw;
@@ -669,12 +703,52 @@ export class Avatar {
   /** Sits on the head, above a crown, antenna or plume. */
   private placeBomb() {
     if (!this.bomb) return;
-    const top = this.crown.visible ? this.headTop + 3.5 : this.skin === "robot" ? 12 : this.skin === "knight" ? this.headTop + 2.5 : this.headTop;
+    const top = this.crown.visible ? this.headTop + 3.5 : this.base === "robot" ? 12 : this.base === "knight" ? this.headTop + 2.5 : this.headTop;
     this.bomb.position.y = (top + 3.5) * PX;
+  }
+
+  /** Item shield on the left arm (Minecraft's: planks with an iron rim). */
+  setShield(on: boolean) {
+    if (on === this.shieldOn) return;
+    this.shieldOn = on;
+    if (on && !this.shield) {
+      const g = new THREE.Group();
+      const wood = this.mat({ color: "#8a6239" });
+      const rim = this.mat({ color: "#b9c1c9" });
+      const board = new THREE.Mesh(new THREE.BoxGeometry(10 * PX, 12 * PX, 1 * PX), wood);
+      const edge = new THREE.Mesh(new THREE.BoxGeometry(11 * PX, 13 * PX, 0.6 * PX), rim);
+      const boss = new THREE.Mesh(new THREE.BoxGeometry(3 * PX, 3 * PX, 1.4 * PX), rim);
+      edge.position.z = -0.3 * PX;
+      boss.position.z = 0.4 * PX;
+      board.castShadow = true;
+      g.add(edge, board, boss);
+      g.position.set(-1 * PX, -9 * PX, 3 * PX);
+      g.rotation.x = Math.PI / 2;
+      this.armL.add(g);
+      this.shield = g;
+    }
+    if (this.shield) this.shield.visible = on;
+  }
+
+  /** Quick chat: a gesture and/or a speech bubble over the name. */
+  emote(gesture: Gesture | null, text: string | null, now: number) {
+    if (gesture) this.gesture = { kind: gesture, at: now };
+    if (!text) return;
+    if (!this.bubble) {
+      this.bubble = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthWrite: false }));
+      this.group.add(this.bubble);
+    }
+    const mat = this.bubble.material;
+    mat.map?.dispose();
+    mat.map = labelTexture(text, "#ffffff", null);
+    mat.needsUpdate = true;
+    this.bubble.scale.set(1.5, 0.42, 1);
+    this.bubbleAt = now;
   }
 
   die(now: number) {
     this.dyingSince = now;
+    if (this.bubble) this.bubble.visible = false;
     this.fallDir = Math.random() < 0.5 ? 1 : -1;
     this.label.visible = false;
     if (this.marker) this.marker.visible = false;
@@ -712,6 +786,8 @@ export class Avatar {
     for (const m of this.weaponMaterials) m.dispose();
     this.label.material.map?.dispose();
     this.label.material.dispose();
+    this.bubble?.material.map?.dispose();
+    this.bubble?.material.dispose();
     this.marker?.material.dispose();
     for (const m of this.bombMats) m.dispose();
     for (const t of this.bombTextures) t.dispose();

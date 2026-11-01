@@ -2,8 +2,22 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
+  APPLE_HEAL,
   ARENA_RADIUS,
   BLOCK,
+  BOT_FILL,
+  EMOTE_GAP_MS,
+  EMOTE_IDS,
+  ITEMS,
+  ITEM_IDS,
+  ITEM_MAX,
+  PROJ_KINDS,
+  SHIELD_KNOCKBACK,
+  SHIELD_MS,
+  SWORD_KINDS,
+  THROW,
+  TNT_FUSE_MS,
+  XP,
   BUFF_IDS,
   BUFFS,
   BUILD_REACH,
@@ -67,10 +81,17 @@ import {
   sizeStats,
   spawnPoint,
   startRadius,
+  stepBody,
   yawTowards,
 } from "../src/game/shared.ts";
 import type {
   BagInfo,
+  ChestInfo,
+  QuestId,
+  EmoteId,
+  ItemId,
+  ProjKind,
+  SwordKind,
   BuffId,
   BuffMods,
   ClientMsg,
@@ -111,6 +132,10 @@ import type { AcConfig, ClientAddr, KbCredit, MoveCtx, Motion } from "./antichea
 import { MobWorld } from "./mobs.ts";
 import type { Mob } from "./mobs.ts";
 import { Records } from "./records.ts";
+import { BOT_NAMES, BOT_SKINS, BOT_SWORDS, BotBrain } from "./bots.ts";
+import { Profiles } from "./profiles.ts";
+import { THEMES, generateTerrain, seededRandom } from "./terrain.ts";
+import type { ThemeId } from "./terrain.ts";
 
 type Action = "hit" | "place" | "break";
 
@@ -130,6 +155,16 @@ interface ParkourRun {
 interface Client {
   id: number;
   ws: WebSocket;
+  /** Set for the server's own players that top up a round (no socket behind them). */
+  bot: BotBrain | null;
+  /** Progress profile (hash of the browser's token), null without a token. */
+  profileId: string | null;
+  sword: SwordKind;
+  /** Item counts in ITEM_IDS order (arena rounds only). */
+  items: number[];
+  shieldUntil: number;
+  lastUseAt: number;
+  lastEmoteAt: number;
   ip: string;
   /** See ClientAddr.known: per-IP limits, bans and ghost filtering only apply when true. */
   ipKnown: boolean;
@@ -212,8 +247,8 @@ interface Client {
   queuedSince: number;
   /** Where to come back to after watching the arena. */
   hubSpot: Spot | null;
-  /** This round: damage dealt, crits, blocks placed. */
-  stats: { damage: number; crits: number; blocks: number };
+  /** This round: damage dealt, crits, blocks placed, chests opened, items used, players knocked off. */
+  stats: RoundStats;
   train: TrainStats;
   trainDirty: boolean;
   trainSentAt: number;
@@ -229,6 +264,32 @@ interface Client {
   lookAt: number;
   hubKey: string;
   hubSentAt: number;
+}
+
+interface RoundStats {
+  damage: number;
+  crits: number;
+  blocks: number;
+  chests: number;
+  items: number;
+  knockoffs: number;
+}
+const emptyStats = (): RoundStats => ({ damage: 0, crits: 0, blocks: 0, chests: 0, items: 0, knockoffs: 0 });
+
+interface Projectile {
+  id: number;
+  kind: ProjKind;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  owner: number;
+  bornAt: number;
+  /** TNT: when it goes off (it lies still once it lands). */
+  fuseAt: number;
+  landed: boolean;
 }
 
 export interface Violation {
@@ -262,6 +323,25 @@ export interface ServerOptions {
   buildTtlMs?: number;
   /** Duel fight time limit (default 90 s). */
   duelMs?: number;
+  /** Generated arena terrain (default on; tests use the flat island). */
+  terrain?: boolean;
+  terrainTheme?: ThemeId;
+  /** Seed of the first round's map (random by default). */
+  terrainSeed?: number;
+  /** Chests with items on the arena (default on). */
+  chests?: boolean;
+  /** Rounds are topped up with bots to this many players (default PVP_BOTS or BOT_FILL; 0: none). */
+  bots?: number;
+  /** Shared stores (rooms of one process share them); by default each server opens its own. */
+  records?: Records;
+  profiles?: Profiles;
+  /** Profiles file when `profiles` isn't given; null keeps them in memory. Default: PVP_PROFILES_FILE or data/profiles.json. */
+  profilesFile?: string | null;
+  guard?: IpGuard;
+  /** Code of a private room (null: the public server). */
+  room?: string | null;
+  /** Items every player starts a round with (tests). */
+  startItems?: Partial<Record<ItemId, number>>;
 }
 
 const BREAK_COOLDOWN_MS = 120;
@@ -346,6 +426,26 @@ const PARKOUR_MAX_MS = 5 * 60_000;
 /** Falling to the floor this far from the parkour start ends the run. */
 const PARKOUR_FALL_DIST = 4;
 
+/** Chests: how many lie on the island at once (a new one every third of a buff interval). */
+const CHEST_MAX = 8;
+const CHEST_PICKUP = 1.3;
+const USE_COOLDOWN_MS = 350;
+const PROJ_LIFE_MS = 6000;
+const SNOWBALL_KNOCKBACK = 6.5;
+const TNT_RADIUS = 3.6;
+const TNT_DAMAGE = 12;
+const TNT_BLOCKS = 2.2;
+const PEARL_DAMAGE = 2;
+/** What a chest gives in each mode: [item, weight, count]. */
+const LOOT: [ItemId, number, number][] = [
+  ["apple", 3, 1],
+  ["pearl", 2, 1],
+  ["shield", 2, 1],
+  ["snowball", 3, 4],
+  ["tnt", 2, 1],
+];
+const LOOT_SKIP: Partial<Record<GameMode, ItemId[]>> = { sumo: ["apple", "tnt"], spleef: ["apple", "shield"] };
+
 const COOLDOWN_MS: Record<Action, number> = { hit: HIT_COOLDOWN_MS, place: PLACE_COOLDOWN_MS, break: BREAK_COOLDOWN_MS };
 
 const finite = (...v: unknown[]) => v.every((n) => typeof n === "number" && Number.isFinite(n));
@@ -380,6 +480,9 @@ function boxDistance(p: Vec3, min: Vec3, max: Vec3): number {
 }
 
 let warnedUnknownIp = false;
+
+/** Stands in for a bot's socket: nothing is ever sent to it. */
+const BOT_SOCKET = { readyState: WebSocket.CLOSED, send() {}, close() {}, terminate() {}, ping() {} } as unknown as WebSocket;
 
 function reject(socket: Duplex, status: string): void {
   socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
@@ -428,10 +531,29 @@ export class PvpServer {
   private startAt: number | null = null;
   private duel: { a: Client; b: Client; state: "countdown" | "fight"; until: number } | null = null;
   private rosterDirty = false;
+  private weeklyDirty = false;
+  private weeklySentAt = 0;
   private rosterSentAt = 0;
   private lastSweep = 0;
   private bags = new Map<number, BagInfo>();
   private nextBagId = 1;
+  private chests = new Map<number, ChestInfo>();
+  private nextChestId = 1;
+  private nextChestAt = 0;
+  /** Where chests may appear on this round's map. */
+  private chestSpots: { x: number; y: number; z: number }[] = [];
+  private projectiles = new Map<number, Projectile>();
+  private nextProjId = 1;
+  private theme: ThemeId | null = null;
+  private terrainOn: boolean;
+  private terrainTheme: ThemeId | undefined;
+  private terrainSeed: number | undefined;
+  private chestsOn: boolean;
+  private startItems: Partial<Record<ItemId, number>>;
+  private botFill: number;
+  private profiles: Profiles;
+  private ownsStores: boolean;
+  readonly room: string | null;
   /** Buffs of each slot: one, two in the Chaos finale. */
   private buffPlan: BuffId[][] = [];
   /** Buffs the round's mode allows. */
@@ -479,6 +601,7 @@ export class PvpServer {
   private scoreSentAt = 0;
   private vote: { slot: number; options: BuffId[]; until: number; sentAt: number } | null = null;
   private lastLava = 0;
+  private botsOnlyAt = 0;
   private rouletteIndex = -1;
   private tickSeq = 0;
   private lastTickAt = Date.now();
@@ -489,7 +612,7 @@ export class PvpServer {
   constructor(opts: ServerOptions = {}) {
     this.timings = makeTimings(opts.timeScale ?? 1);
     this.cfg = { ...configFromEnv(), ...opts.anticheat };
-    this.guard = new IpGuard(this.cfg);
+    this.guard = opts.guard ?? new IpGuard(this.cfg);
     this.fixedBuffs = opts.buffPlan ?? null;
     this.fixedMode = opts.mode ?? null;
     this.fixedSpawns = opts.spawnPoints ?? null;
@@ -497,8 +620,19 @@ export class PvpServer {
     this.rangeMs = opts.rangeMs ?? 30_000;
     this.buildTtlMs = opts.buildTtlMs ?? 60_000;
     this.duelMs = opts.duelMs ?? 90_000;
+    this.terrainOn = opts.terrain ?? true;
+    this.terrainTheme = opts.terrainTheme;
+    this.terrainSeed = opts.terrainSeed;
+    this.chestsOn = opts.chests ?? true;
+    this.startItems = opts.startItems ?? {};
+    const envBots = Number(process.env.PVP_BOTS);
+    this.botFill = Math.min(MAX_PLAYERS, Math.max(0, opts.bots ?? (Number.isFinite(envBots) && process.env.PVP_BOTS !== "" && process.env.PVP_BOTS !== undefined ? envBots : BOT_FILL)));
+    this.room = opts.room ?? null;
+    this.ownsStores = !opts.records && !opts.profiles;
     const file = opts.recordsFile !== undefined ? opts.recordsFile : process.env.PVP_RECORDS_FILE || "data/records.json";
-    this.records = new Records(file);
+    this.records = opts.records ?? new Records(file);
+    const pfile = opts.profilesFile !== undefined ? opts.profilesFile : process.env.PVP_PROFILES_FILE || "data/profiles.json";
+    this.profiles = opts.profiles ?? new Profiles(pfile);
     const q = hubBlocks();
     for (let i = 0; i < q.length; i += 4) this.hub.vox.set(q[i], q[i + 1], q[i + 2], q[i + 3]);
     this.arena.vox.floorRadius = ARENA_RADIUS;
@@ -509,6 +643,7 @@ export class PvpServer {
       const now = Date.now();
       this.guard.sweep(now);
       for (const c of this.clients.values()) {
+        if (c.bot) continue;
         if (!c.isAlive) {
           c.ws.terminate();
           continue;
@@ -540,14 +675,25 @@ export class PvpServer {
       reject(socket, "429 Too Many Requests");
       return true;
     }
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.onConnection(ws, addr));
+    this.accept(req, socket, head, addr);
     return true;
+  }
+
+  /** Takes a connection already vetted (path, origin, rate) by the room manager. */
+  accept(req: IncomingMessage, socket: Duplex, head: Buffer, addr: ClientAddr): void {
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.onConnection(ws, addr));
+  }
+
+  /** People connected (bots aside): an empty private room gets closed. */
+  get humans(): number {
+    return [...this.clients.values()].filter((c) => !c.bot).length;
   }
 
   close(): void {
     clearInterval(this.tickTimer);
     clearInterval(this.pingTimer);
     this.records.flush();
+    this.profiles.flush();
     for (const c of this.clients.values()) c.ws.terminate();
     this.wss.close();
   }
@@ -562,11 +708,44 @@ export class PvpServer {
       return;
     }
     if (addr.known) this.guard.opened(addr.ip);
-    const c: Client = {
+    const c = this.newClient(ws, addr.ip, addr.known, now);
+    this.clients.set(c.id, c);
+    ws.on("pong", () => {
+      c.isAlive = true;
+      if (!c.pingAt) return;
+      const sample = Math.min(2000, Date.now() - c.pingAt);
+      c.pingAt = 0;
+      c.rtt = c.rtt === DEFAULT_RTT_MS ? sample : c.rtt * 0.7 + sample * 0.3;
+    });
+    ws.on("message", (data) => {
+      if (c.kicked) return;
+      const now = Date.now();
+      if (!c.msgs.take(now)) return this.flag(c, "flood", 0.25, "message rate");
+      let msg: ClientMsg;
+      try {
+        msg = JSON.parse(String(data));
+      } catch {
+        return this.flag(c, "packet", 1, "invalid JSON");
+      }
+      this.onMessage(c, msg, now);
+    });
+    ws.on("close", () => this.onClose(c));
+    ws.on("error", () => ws.terminate());
+  }
+
+  private newClient(ws: WebSocket, ip: string, ipKnown: boolean, now: number): Client {
+    return {
       id: this.nextId++,
       ws,
-      ip: addr.ip,
-      ipKnown: addr.known,
+      ip,
+      ipKnown,
+      bot: null,
+      profileId: null,
+      sword: "stone",
+      items: ITEM_IDS.map(() => 0),
+      shieldUntil: 0,
+      lastUseAt: 0,
+      lastEmoteAt: 0,
       name: null,
       color: PLAYER_COLORS[0],
       skin: "steve",
@@ -621,7 +800,7 @@ export class PvpServer {
       lastActiveAt: now,
       queuedSince: 0,
       hubSpot: null,
-      stats: { damage: 0, crits: 0, blocks: 0 },
+      stats: emptyStats(),
       train: emptyTrain(),
       trainDirty: false,
       trainSentAt: 0,
@@ -638,28 +817,6 @@ export class PvpServer {
       hubKey: "",
       hubSentAt: 0,
     };
-    this.clients.set(c.id, c);
-    ws.on("pong", () => {
-      c.isAlive = true;
-      if (!c.pingAt) return;
-      const sample = Math.min(2000, Date.now() - c.pingAt);
-      c.pingAt = 0;
-      c.rtt = c.rtt === DEFAULT_RTT_MS ? sample : c.rtt * 0.7 + sample * 0.3;
-    });
-    ws.on("message", (data) => {
-      if (c.kicked) return;
-      const now = Date.now();
-      if (!c.msgs.take(now)) return this.flag(c, "flood", 0.25, "message rate");
-      let msg: ClientMsg;
-      try {
-        msg = JSON.parse(String(data));
-      } catch {
-        return this.flag(c, "packet", 1, "invalid JSON");
-      }
-      this.onMessage(c, msg, now);
-    });
-    ws.on("close", () => this.onClose(c));
-    ws.on("error", () => ws.terminate());
   }
 
   private onMessage(c: Client, m: ClientMsg, now: number): void {
@@ -679,7 +836,7 @@ export class PvpServer {
       case "watch":
         return this.onWatch(c, !!m.on);
       case "look":
-        return this.onLook(c, m.color, m.skin, now);
+        return this.onLook(c, m.color, m.skin, m.sword, now);
       case "duel":
         return this.onDuelInvite(c, m.id, now);
       case "duelAnswer":
@@ -688,6 +845,10 @@ export class PvpServer {
         return this.onShoot(c, m, now);
       case "buffVote":
         return this.onBuffVote(c, m.i);
+      case "use":
+        return this.onUse(c, m, now);
+      case "emote":
+        return this.onEmote(c, m, now);
     }
   }
 
@@ -697,9 +858,13 @@ export class PvpServer {
       c.ws.close(CLOSE_OUTDATED, "outdated client");
       return;
     }
+    c.profileId = Profiles.idOf(m.token);
     let name = sanitizeName(m.name) || `Игрок${c.id}`;
     const taken = new Set(this.named().map((p) => p.name.toLowerCase()));
-    if (taken.has(name.toLowerCase())) name = `${name.slice(0, 13)}#${c.id}`;
+    // A name reserved by someone else's progress gets a suffix, like one already in the game.
+    const reserved = !this.profiles.claimName(c.profileId, name);
+    if (taken.has(name.toLowerCase()) || reserved) name = `${name.slice(0, 13)}#${c.id}`;
+    if (reserved) this.profiles.claimName(c.profileId, name);
     c.name = name;
     if (typeof m.color === "string" && PLAYER_COLORS.includes(m.color)) {
       c.color = m.color;
@@ -707,10 +872,17 @@ export class PvpServer {
       const usedColors = new Set(this.named().map((p) => p.color));
       c.color = PLAYER_COLORS.find((col) => !usedColors.has(col)) ?? PLAYER_COLORS[c.id % PLAYER_COLORS.length];
     }
-    c.skin = SKIN_IDS.includes(m.skin as SkinId) ? (m.skin as SkinId) : "steve";
+    const skin = SKIN_IDS.includes(m.skin as SkinId) ? (m.skin as SkinId) : "steve";
+    const sword = SWORD_KINDS.includes(m.sword as SwordKind) ? (m.sword as SwordKind) : "stone";
+    const can = this.profiles.canWear(c.profileId, skin, sword);
+    c.skin = can.skin ? skin : "steve";
+    c.sword = can.sword ? sword : "stone";
     c.joinedAt = c.lastActiveAt = now;
 
-    this.send(c, { t: "welcome", id: c.id });
+    this.send(c, { t: "welcome", id: c.id, room: this.room });
+    if (reserved) this.send(c, { t: "hint", text: "Этот ник закреплён за другим игроком с прогрессом" });
+    this.sendProfile(c);
+    this.send(c, { t: "weekly", w: this.profiles.weekly() });
     this.send(c, this.phaseMsg());
     this.send(c, { t: "records", r: this.records.snapshot() });
     if (this.lastResults) this.send(c, { t: "results", r: this.lastResults });
@@ -814,6 +986,7 @@ export class PvpServer {
       c.ready = false;
       this.send(c, { t: "world", w: "arena", blocks: this.arena.vox.toQuads() });
       this.send(c, { t: "bags", bags: [...this.bags.values()] });
+      this.send(c, { t: "chests", chests: [...this.chests.values()] });
       this.sendRoundState(c);
       this.sendYou(c);
       return;
@@ -821,12 +994,16 @@ export class PvpServer {
     if (c.watching || (c.loc === "arena" && !c.alive)) this.toHub(c, null);
   }
 
-  private onLook(c: Client, color: unknown, skin: unknown, now: number): void {
+  private onLook(c: Client, color: unknown, skin: unknown, sword: unknown, now: number): void {
     if (now - c.lookAt < 300) return;
     if (typeof color !== "string" || !PLAYER_COLORS.includes(color) || !SKIN_IDS.includes(skin as SkinId)) return;
+    const kind = SWORD_KINDS.includes(sword as SwordKind) ? (sword as SwordKind) : c.sword;
+    const can = this.profiles.canWear(c.profileId, skin as SkinId, kind);
+    if (!can.skin || !can.sword) return this.hint(c, "Это ещё не открыто", now);
     c.lookAt = now;
     c.color = color;
     c.skin = skin as SkinId;
+    c.sword = kind;
     c.lastActiveAt = now;
     this.rosterDirty = true;
   }
@@ -845,7 +1022,36 @@ export class PvpServer {
     const leaders = MODE_IDS.filter((m) => most > 0 && tally.get(m) === most);
     const mode = this.fixedMode ?? (leaders.length ? leaders[Math.floor(Math.random() * leaders.length)] : "classic");
     for (const c of this.named()) c.vote = null;
+    this.removeBots();
+    const bots = chosen.length ? Math.max(0, this.botFill - chosen.length) : 0;
+    for (let i = 0; i < bots; i++) chosen.push(this.addBot(now));
     this.startCountdown(chosen, mode);
+  }
+
+  /** A bot player: a client with no socket, driven by BotBrain on every tick. */
+  private addBot(now: number): Client {
+    const c = this.newClient(BOT_SOCKET, "bot", false, now);
+    const used = new Set(this.named().map((p) => p.name.toLowerCase()));
+    c.name = shuffle(BOT_NAMES).map((n) => `Бот ${n}`).find((n) => !used.has(n.toLowerCase())) ?? `Бот ${c.id}`;
+    const colors = new Set(this.named().map((p) => p.color));
+    c.color = shuffle(PLAYER_COLORS).find((col) => !colors.has(col)) ?? PLAYER_COLORS[c.id % PLAYER_COLORS.length];
+    c.skin = BOT_SKINS[Math.floor(Math.random() * BOT_SKINS.length)];
+    c.sword = BOT_SWORDS[Math.floor(Math.random() * BOT_SWORDS.length)];
+    c.bot = new BotBrain({ x: 0, y: 0, z: 0 });
+    c.motion.synced = true;
+    this.clients.set(c.id, c);
+    return c;
+  }
+
+  private removeBots(): void {
+    let any = false;
+    for (const c of [...this.clients.values()]) {
+      if (!c.bot) continue;
+      this.clients.delete(c.id);
+      if (this.crownId === c.id) this.crownId = null;
+      any = true;
+    }
+    if (any) this.rosterDirty = true;
   }
 
   private startCountdown(chosen: Client[], mode: GameMode): void {
@@ -873,7 +1079,13 @@ export class PvpServer {
     this.crumbleWarned = -1;
     this.setFloor(startRadius(mode));
     if (mode === "spleef") this.fillSpleef();
+    this.projectiles.clear();
+    this.chests.clear();
+    this.chestSpots = [];
+    this.theme = null;
     this.deaths = [];
+    this.botsOnlyAt = 0;
+    this.nextChestAt = 0;
     this.setPhase("countdown");
     this.buffLog = [{ tick: this.tickSeq, buffs: [], sizes: new Map() }];
     for (const c of this.named()) {
@@ -882,12 +1094,20 @@ export class PvpServer {
     }
     const teams = this.assignTeams(ps, mode);
     this.teamGoal = TEAM_KILLS_PER_PLAYER * Math.max(1, ...[0, 1].map((k) => [...teams.values()].filter((v) => v === k).length));
+    const spots = ps.map((p, i) => this.fixedSpawns?.(i, ps.length) ?? this.startSpot(i, ps.length, offset, teams.get(p.id) ?? null));
+    if (this.terrainOn) {
+      const seed = this.terrainSeed ?? Math.floor(Math.random() * 2 ** 31);
+      this.terrainSeed = undefined;
+      const map = generateTerrain(this.arena.vox, { mode, radius: this.floorR, keep: spots.map((sp) => ({ x: sp.x, z: sp.z, r: 2.5 })), rnd: seededRandom(seed), theme: this.terrainTheme });
+      this.theme = map.theme;
+      this.chestSpots = map.spots;
+    }
     const blocks = this.arena.vox.toQuads();
     const dirt = mode === "sumo" || mode === "spleef" ? 0 : START_DIRT + (mode === "builders" ? BUILDERS_BONUS : 0);
     ps.forEach((p, i) => {
       this.leaveActivities(p);
       const team = teams.get(p.id) ?? null;
-      const s = this.fixedSpawns?.(i, ps.length) ?? this.startSpot(i, ps.length, offset, team);
+      const s = spots[i];
       p.loc = "arena";
       p.watching = false;
       p.hubSpot = null;
@@ -914,14 +1134,26 @@ export class PvpServer {
         lastDamageAt: 0,
         nextRegenAt: 0,
       });
-      p.stats = { damage: 0, crits: 0, blocks: 0 };
-      this.relocate(p, { x: s.x, y: mode === "spleef" ? SPLEEF_LAYERS[1] + 1 : 0, z: s.z, yaw: s.yaw });
+      p.stats = emptyStats();
+      p.items = ITEM_IDS.map((id) => Math.min(ITEM_MAX, this.startItems[id] ?? 0));
+      p.shieldUntil = 0;
+      p.lastUseAt = 0;
+      this.relocate(p, { x: s.x, y: mode === "spleef" ? SPLEEF_LAYERS[1] + 1 : (this.standAt(s.x, s.z) ?? 0), z: s.z, yaw: s.yaw });
       this.send(p, { t: "world", w: "arena", blocks });
       this.send(p, { t: "bags", bags: [] });
+      this.send(p, { t: "chests", chests: [] });
       this.teleport(p, s.yaw);
       this.sendYou(p);
     });
-    this.notice(`Раунд начался · ${def.title} · ${plural(ps.length, "игрок", "игрока", "игроков")}`, def.color);
+    if (this.chestsOn) {
+      const n = Math.min(CHEST_MAX, 2 + Math.ceil(ps.length / 2));
+      for (let i = 0; i < n; i++) this.spawnChest(false);
+      this.sendChests();
+    }
+    const bots = ps.filter((p) => p.bot).length;
+    const map = this.theme ? ` · карта «${THEMES[this.theme]}»` : "";
+    const who = plural(ps.length - bots, "игрок", "игрока", "игроков") + (bots ? ` и ${plural(bots, "бот", "бота", "ботов")}` : "");
+    this.notice(`Раунд начался · ${def.title}${map} · ${who}`, def.color);
     if (def.respawn) this.sendScore(true);
     this.broadcastRoster();
   }
@@ -981,8 +1213,11 @@ export class PvpServer {
   }
 
   private toLobby(): void {
+    this.removeBots();
     this.clearArena();
     this.bags.clear();
+    this.chests.clear();
+    this.projectiles.clear();
     this.resetRoundEvents();
     this.buffPlan = [];
     this.buffIndex = -1;
@@ -993,7 +1228,8 @@ export class PvpServer {
       const wasThere = c.loc === "arena" || c.watching;
       c.role = "spectator";
       c.alive = false;
-      Object.assign(c, { size: 1, team: null, maxHp: MAX_HP, bonusHp: 0, arrows: 0, respawnAt: 0, buffVote: null, score: 0 });
+      Object.assign(c, { size: 1, team: null, maxHp: MAX_HP, bonusHp: 0, arrows: 0, respawnAt: 0, buffVote: null, score: 0, shieldUntil: 0 });
+      c.items = ITEM_IDS.map(() => 0);
       if (c === winner) this.toHub(c, HUB.pedestal);
       else if (wasThere) this.toHub(c, null);
     }
@@ -1053,6 +1289,9 @@ export class PvpServer {
     const bags = this.bags.size;
     for (const [id, b] of this.bags) if (!cellInRing(Math.floor(b.x), Math.floor(b.z), r)) this.bags.delete(id);
     if (this.bags.size !== bags) this.sendTo(this.viewers("arena"), { t: "bags", bags: [...this.bags.values()] });
+    const chests = this.chests.size;
+    for (const [id, ch] of this.chests) if (!cellInRing(Math.floor(ch.x), Math.floor(ch.z), r)) this.chests.delete(id);
+    if (this.chests.size !== chests) this.sendChests();
     this.broadcast({ t: "floor", r, next: null, ms: 0 });
   }
 
@@ -1225,6 +1464,8 @@ export class PvpServer {
 
   private checkRoundEnd(): void {
     if (this.phase !== "playing" && this.phase !== "countdown") return;
+    // Everyone real left: the bots don't play on for nobody.
+    if (this.participants().every((p) => p.bot)) return this.endRound(null, false);
     if (!MODES[this.mode].respawn) {
       const alive = this.alivePlayers();
       if (alive.length <= 1) this.endRound(alive[0] ?? null, false);
@@ -1271,9 +1512,13 @@ export class PvpServer {
     this.setPhase("ended");
     this.lastResults = this.results(ps, winner, onPoints, team);
     this.broadcast({ t: "results", r: this.lastResults });
-    if (winner?.name) this.records.addWin(winner.name);
-    for (const p of ps) if (p.name) this.records.addKills(p.name, p.kills);
-    this.recordsDirty = true;
+    // Daily records count rounds between people only: a win over bots alone isn't one.
+    if (ps.filter((p) => !p.bot).length >= 2) {
+      if (winner?.name && !winner.bot) this.records.addWin(winner.name);
+      for (const p of ps) if (p.name && !p.bot) this.records.addKills(p.name, p.kills);
+      this.recordsDirty = true;
+    }
+    this.rewardRound(ps, winner, team);
     this.crownId = winner?.id ?? null;
     const teamDef = team !== null ? MODES[this.mode].teams?.[team] : undefined;
     if (teamDef) this.notice(`${teamDef.name} победили! Корону получает ${winner?.name ?? "—"}`, teamDef.color);
@@ -1302,6 +1547,7 @@ export class PvpServer {
       blocks: c.stats.blocks,
       score: c.score,
       team: c.team,
+      bot: !!c.bot,
     }));
     const awards: RoundResult["awards"] = [];
     const teamDef = team !== null ? MODES[this.mode].teams?.[team] : undefined;
@@ -1327,6 +1573,51 @@ export class PvpServer {
     return { mode: this.mode, winner: winner?.id ?? null, winnerName: winner?.name ?? null, pointsWin: onPoints, team, rows, awards };
   }
 
+  /** XP and quest progress for everyone with a profile who played the round. */
+  private rewardRound(ps: Client[], winner: Client | null, team: number | null): void {
+    const humans = ps.filter((p) => !p.bot).length;
+    // A round against bots alone is worth half.
+    const scale = humans >= 2 ? 1 : 0.5;
+    const rows = this.lastResults?.rows ?? [];
+    for (const p of ps) {
+      if (p.bot || !p.profileId) continue;
+      const id = p.profileId;
+      const won = p === winner || (team !== null && p.team === team);
+      const place = rows.findIndex((r) => r.id === p.id);
+      const lines: [string, number][] = [["Раунд сыгран", XP.round]];
+      if (p.kills) lines.push([`Убийства ×${p.kills}`, XP.kill * p.kills]);
+      if (won) lines.push(["Победа", XP.win]);
+      else if (place >= 0 && place < 3 && ps.length >= 3 && !MODES[this.mode].respawn) lines.push([`${place + 1}-е место`, XP.top3]);
+      if (p.stats.chests) lines.push([`Сундуки ×${p.stats.chests}`, XP.chest * p.stats.chests]);
+      if (scale < 1) for (const l of lines) l[1] = Math.ceil(l[1] * scale);
+      const before = this.profiles.stats(id);
+      const xp = lines.reduce((n, l) => n + l[1], 0);
+      this.profiles.addRound(id, xp, won, p.kills);
+      const st = p.stats;
+      const progress: [QuestId, number][] = [
+        ["rounds", 1],
+        ["kills", p.kills],
+        ["knockoff", st.knockoffs],
+        ["win", won ? 1 : 0],
+        ["chests", st.chests],
+        ["damage", Math.round(st.damage)],
+        ["items", st.items],
+        ["crits", st.crits],
+      ];
+      for (const [q, n] of progress) lines.push(...this.profiles.quest(id, q, n));
+      const got = this.profiles.unlocksSince(id, before);
+      const total = lines.reduce((n, l) => n + l[1], 0);
+      this.send(p, { t: "reward", xp: total, lines, level: this.profiles.stats(id).level, levelUp: got.levelUp, unlocked: got.unlocked });
+      this.sendProfile(p);
+      if (got.levelUp) this.rosterDirty = true;
+    }
+    this.weeklyDirty = true;
+  }
+
+  private sendProfile(c: Client): void {
+    if (c.profileId) this.send(c, { t: "profile", p: this.profiles.info(c.profileId) });
+  }
+
   /** Overtime ran out: the best survivor by kills, then damage, then health (ties drawn by lot). */
   private bestOnPoints(alive: Client[]): Client | null {
     return shuffle(alive).sort((a, b) => b.kills - a.kills || b.stats.damage - a.stats.damage || b.hp - a.hp)[0] ?? null;
@@ -1342,6 +1633,9 @@ export class PvpServer {
     this.deaths.push(victim.id);
     if (killer && (killer === victim || this.sameTeam(killer, victim) || killer.role !== "player")) killer = null;
     if (killer) killer.kills++;
+    if (killer && reason === "fall") killer.stats.knockoffs++;
+    victim.shieldUntil = 0;
+    if (victim.items.some((n) => n > 0)) victim.items = ITEM_IDS.map(() => 0);
     // A bag that fell off the island is gone with its owner.
     if (victim.dirt > 0 && reason !== "fall") {
       const bag: BagInfo = { id: this.nextBagId++, x: r2(victim.x), y: this.groundBelow(this.arena, victim.x, victim.y, victim.z), z: r2(victim.z), dirt: victim.dirt };
@@ -1358,6 +1652,7 @@ export class PvpServer {
     const infected = this.mode === "infection" && victim.team === 0 && playing;
     if (infected) victim.team = 1;
     this.broadcast({ t: "kill", victim: victim.id, killer: killer?.id ?? null, reason });
+    if (killer?.bot && Math.random() < 0.3) this.botEmote(killer, Math.random() < 0.5 ? "lol" : "gg");
     if (killer) this.killCallout(killer, victim, streak, now);
     if (killer?.alive && this.has("vampire")) {
       killer.bonusHp = Math.min(VAMPIRE_MAX_BONUS, killer.bonusHp + VAMPIRE_BONUS);
@@ -1405,11 +1700,13 @@ export class PvpServer {
       c.hubSpot = null;
       this.send(c, { t: "world", w: "arena", blocks: this.arena.vox.toQuads() });
       this.send(c, { t: "bags", bags: [...this.bags.values()] });
+      this.send(c, { t: "chests", chests: [...this.chests.values()] });
       this.sendRoundState(c);
     }
     c.watching = false;
     const s = this.respawnSpot(c);
-    Object.assign(c, { alive: true, bonusHp: 0, dirt: RESPAWN_DIRT, arrows: this.has("bows") ? BOW_ARROWS : 0, lastHitBy: 0, lastHitAt: 0, lastDamageAt: 0, nextRegenAt: 0 });
+    Object.assign(c, { alive: true, bonusHp: 0, dirt: RESPAWN_DIRT, arrows: this.has("bows") ? BOW_ARROWS : 0, lastHitBy: 0, lastHitAt: 0, lastDamageAt: 0, nextRegenAt: 0, shieldUntil: 0 });
+    c.items = ITEM_IDS.map(() => 0);
     c.maxHp = sizeStats(c.size).maxHp;
     c.hp = c.maxHp;
     this.relocate(c, s);
@@ -1544,6 +1841,12 @@ export class PvpServer {
       this.lastSweep = now;
       if (this.records.checkDay()) this.recordsDirty = true;
       this.records.flush();
+      this.profiles.flush();
+    }
+    if (this.weeklyDirty && now - this.weeklySentAt >= 5000) {
+      this.weeklyDirty = false;
+      this.weeklySentAt = now;
+      this.broadcast({ t: "weekly", w: this.profiles.weekly() });
     }
     if (this.recordsDirty && now - this.recordsSentAt >= 1000) {
       this.recordsDirty = false;
@@ -1594,7 +1897,11 @@ export class PvpServer {
     }
 
     this.pickupBags();
-    for (const p of this.alivePlayers()) this.expireCredits(p, now);
+    this.chestTick(now);
+    this.shieldTick(now);
+    this.botsTick(now);
+    if (this.phase !== "playing") return;
+    for (const p of this.alivePlayers()) if (!p.bot) this.expireCredits(p, now);
     if (MODES[this.mode].respawn) for (const p of this.participants()) if (!p.alive && p.respawnAt && now >= p.respawnAt) this.respawn(p);
     this.hillTick(now);
     if (this.phase !== "playing") return;
@@ -1602,6 +1909,19 @@ export class PvpServer {
     // A client that stopped reporting on its way down doesn't get to hang under the island.
     for (const p of this.alivePlayers()) if (p.alive && p.y < 0 && now - p.lastMoveAt > STALE_FALL_MS) this.fallOut(p, now);
     if (this.phase !== "playing") return;
+
+    // Only bots left fighting: nobody is waiting for their duel to end.
+    const left = this.alivePlayers();
+    if (!MODES[this.mode].respawn && left.length > 1 && left.every((p) => p.bot)) {
+      if (!this.botsOnlyAt) {
+        this.botsOnlyAt = now;
+        this.callout("ОСТАЛИСЬ ТОЛЬКО БОТЫ", "Раунд закончится через 10 секунд", "#94a3b8");
+      } else if (now - this.botsOnlyAt >= Math.min(10_000, t.roundMs / 6)) {
+        return this.endRound(this.bestOnPoints(left), true);
+      }
+    } else {
+      this.botsOnlyAt = 0;
+    }
 
     if (elapsed >= t.roundMs) {
       if (this.mode === "infection") return this.endTeam(0, false);
@@ -1718,6 +2038,7 @@ export class PvpServer {
     }
 
     this.stepArrows(now);
+    if (this.phase === "playing") this.stepProjectiles(now);
   }
 
   private swapWarn(): number {
@@ -1739,7 +2060,7 @@ export class PvpServer {
 
   /** A blast: damage and knockback falling off with distance, blocks around it gone. `doomed`
    *  (the bomb's holder) dies whatever the mode. */
-  private explode(x: number, y: number, z: number, r: number, maxDmg: number, blockR: number, kind: "bomb" | "meteor", credit: Client | null, now: number, doomed: Client | null = null): void {
+  private explode(x: number, y: number, z: number, r: number, maxDmg: number, blockR: number, kind: "bomb" | "meteor" | "tnt", credit: Client | null, now: number, doomed: Client | null = null): void {
     this.sendTo(this.viewers("arena"), { t: "boom", x: r2(x), y: r2(y), z: r2(z), r, kind });
     const noDamage = MODES[this.mode].noDamage;
     for (const p of this.alivePlayers()) {
@@ -1762,8 +2083,8 @@ export class PvpServer {
         p.lastHitAt = now;
       }
       const alive = p.hp > 0;
-      if (alive) p.motion.credits.push(knockbackCredit(now, ++p.kbSeq, kx, ky, kz));
-      this.sendTo(this.viewers("arena"), { t: "hurt", id: p.id, by: 0, hp: p.hp, dmg, crit: false, kx, ky, kz, kn: alive ? p.kbSeq : 0 });
+      const kn = alive ? this.push(p, kx, ky, kz, now) : 0;
+      this.sendTo(this.viewers("arena"), { t: "hurt", id: p.id, by: 0, hp: p.hp, dmg, crit: false, kx, ky, kz, kn });
       if (!alive) this.eliminate(p, this.recentHitter(p, now), "boom");
       else this.sendYou(p);
       if (this.phase !== "playing") return;
@@ -1816,6 +2137,10 @@ export class PvpServer {
   }
 
   private arrowHit(a: { vx: number; vz: number }, owner: Client | null, t: Client, now: number): void {
+    if (this.blocked(t, now)) {
+      const len = Math.hypot(a.vx, a.vz) || 1;
+      return this.blockedHit(t, owner?.id ?? 0, (a.vx / len) * 5 * SHIELD_KNOCKBACK, 2, (a.vz / len) * 5 * SHIELD_KNOCKBACK, now, true);
+    }
     const lethal = this.overtime || buffModifiers(this.currentBuffs, this.mode).damage >= MAX_HP;
     const dmg = MODES[this.mode].noDamage ? 0 : lethal ? t.hp : Math.min(t.hp, ARROW_DAMAGE);
     t.hp -= dmg;
@@ -1834,8 +2159,8 @@ export class PvpServer {
     const kz = r2((a.vz / len) * kb);
     const ky = 4;
     const alive = t.hp > 0;
-    if (alive) t.motion.credits.push(knockbackCredit(now, ++t.kbSeq, kx, ky, kz));
-    this.sendTo(this.viewers("arena"), { t: "hurt", id: t.id, by: owner?.id ?? 0, hp: t.hp, dmg, crit: false, kx, ky, kz, kn: alive ? t.kbSeq : 0, arrow: true });
+    const kn = alive ? this.push(t, kx, ky, kz, now) : 0;
+    this.sendTo(this.viewers("arena"), { t: "hurt", id: t.id, by: owner?.id ?? 0, hp: t.hp, dmg, crit: false, kx, ky, kz, kn, arrow: true });
     if (!alive) return this.eliminate(t, owner, "kill");
     this.sendYou(t);
   }
@@ -1843,12 +2168,16 @@ export class PvpServer {
   private onShoot(c: Client, m: Extract<ClientMsg, { t: "shoot" }>, now: number): void {
     if (!finite(m.yaw, m.pitch, m.tk)) return this.flag(c, "packet", 1, "malformed shot");
     if (this.phase !== "playing" || c.loc !== "arena" || !c.alive || c.arrows <= 0 || !c.motion.synced) return;
-    if (now - c.lastShotAt < SHOOT_COOLDOWN_MS) return;
+    this.fireArrow(c, m.yaw, m.pitch, now);
+  }
+
+  private fireArrow(c: Client, yaw: number, pitch: number, now: number): void {
+    if (now - c.lastShotAt < SHOOT_COOLDOWN_MS || c.arrows <= 0) return;
     c.lastShotAt = now;
     c.lastAttackAt = now;
     c.arrows--;
-    c.yaw = m.yaw;
-    c.pitch = clampPitch(m.pitch);
+    c.yaw = yaw;
+    c.pitch = clampPitch(pitch);
     const d = lookDir(c.yaw, c.pitch);
     const eye = { x: c.x, y: c.y + EYE_HEIGHT * c.size, z: c.z };
     const id = this.nextArrowId++;
@@ -1928,6 +2257,358 @@ export class PvpServer {
     if (!v || typeof i !== "number" || !Number.isInteger(i) || i < 0 || i >= v.options.length || !this.voters().includes(c)) return;
     c.buffVote = i;
     this.sendVote();
+  }
+
+  // ---------------------------------------------------------------- shields, items and chests
+
+  /** Knockback for a player: the client applies it (and the anticheat expects it), a bot's body
+   *  takes it right away. Returns the knockback number to send (0 for bots). */
+  private push(t: Client, kx: number, ky: number, kz: number, now: number): number {
+    if (t.bot) {
+      t.bot.knock(kx, ky, kz);
+      return 0;
+    }
+    t.motion.credits.push(knockbackCredit(now, ++t.kbSeq, kx, ky, kz));
+    return t.kbSeq;
+  }
+
+  /** A raised shield takes the hit (and breaks). */
+  private blocked(t: Client, now: number): boolean {
+    if (t.shieldUntil <= now) return false;
+    t.shieldUntil = 0;
+    this.rosterDirty = true;
+    return true;
+  }
+
+  private blockedHit(t: Client, by: number, kx: number, ky: number, kz: number, now: number, arrow = false): void {
+    const [x, y, z] = [r2(kx), r2(ky), r2(kz)];
+    const kn = this.push(t, x, y, z, now);
+    this.sendTo(this.viewers("arena"), { t: "hurt", id: t.id, by, hp: t.hp, dmg: 0, crit: false, kx: x, ky: y, kz: z, kn, blocked: true, ...(arrow ? { arrow } : {}) });
+    this.sendYou(t);
+  }
+
+  private onUse(c: Client, m: Extract<ClientMsg, { t: "use" }>, now: number): void {
+    if (!finite(m.yaw, m.pitch, m.tk) || !ITEM_IDS.includes(m.item)) return this.flag(c, "packet", 1, "malformed item use");
+    if (this.phase !== "playing" || c.loc !== "arena" || !c.alive || !c.motion.synced) return;
+    this.useItem(c, m.item, m.yaw, m.pitch, now);
+  }
+
+  private useItem(c: Client, item: ItemId, yaw: number, pitch: number, now: number): void {
+    const i = ITEM_IDS.indexOf(item);
+    if (c.items[i] <= 0 || now - c.lastUseAt < USE_COOLDOWN_MS) return;
+    c.yaw = yaw;
+    c.pitch = clampPitch(pitch);
+    if (item === "apple") {
+      if (c.hp >= c.maxHp) return this.hint(c, "Здоровье и так полное", now);
+      c.hp = Math.min(c.maxHp, c.hp + APPLE_HEAL);
+    } else if (item === "shield") {
+      if (c.shieldUntil > now) return;
+      c.shieldUntil = now + SHIELD_MS;
+      this.rosterDirty = true;
+    } else {
+      const k = THROW[item];
+      const d = lookDir(c.yaw, c.pitch);
+      const eye = { x: c.x, y: c.y + EYE_HEIGHT * c.size, z: c.z };
+      const id = this.nextProjId++;
+      this.projectiles.set(id, {
+        id,
+        kind: item,
+        x: eye.x + d.x * 0.4,
+        y: eye.y + d.y * 0.4,
+        z: eye.z + d.z * 0.4,
+        vx: d.x * k.speed,
+        vy: d.y * k.speed + (item === "tnt" ? 3 : 0),
+        vz: d.z * k.speed,
+        owner: c.id,
+        bornAt: now,
+        fuseAt: item === "tnt" ? now + TNT_FUSE_MS : 0,
+        landed: false,
+      });
+      c.lastAttackAt = now;
+    }
+    c.items[i]--;
+    c.lastUseAt = now;
+    c.lastActiveAt = now;
+    c.stats.items++;
+    this.sendTo(this.viewers("arena"), { t: "used", id: c.id, item });
+    this.sendYou(c);
+  }
+
+  /** Snowballs, ender pearls and TNT in flight (and TNT lying primed). */
+  private stepProjectiles(now: number): void {
+    if (!this.projectiles.size) return;
+    const dt = TICK_MS / 1000;
+    for (const p of [...this.projectiles.values()]) {
+      if (p.kind === "tnt" && now >= p.fuseAt) {
+        this.projectiles.delete(p.id);
+        const owner = this.clients.get(p.owner);
+        this.explode(p.x, p.y + 0.5, p.z, TNT_RADIUS, TNT_DAMAGE, TNT_BLOCKS, "tnt", owner?.role === "player" ? owner : null, now);
+        if (this.phase !== "playing") return;
+        continue;
+      }
+      if (p.landed) {
+        // A block under a primed TNT may be gone: it falls again.
+        if (!this.arena.vox.solid(Math.floor(p.x), Math.floor(p.y - 0.05), Math.floor(p.z))) p.landed = false;
+        else continue;
+      }
+      const from = { x: p.x, y: p.y, z: p.z };
+      p.vy -= THROW[p.kind].gravity * dt;
+      const to = { x: p.x + p.vx * dt, y: p.y + p.vy * dt, z: p.z + p.vz * dt };
+      const owner = this.clients.get(p.owner) ?? null;
+      let hit: Client | null = null;
+      let wall: Vec3 | null = null;
+      let last = from;
+      for (let k = 1; k <= 6 && !hit && !wall; k++) {
+        const f = k / 6;
+        const q = { x: from.x + (to.x - from.x) * f, y: from.y + (to.y - from.y) * f, z: from.z + (to.z - from.z) * f };
+        if (this.arena.vox.solid(Math.floor(q.x), Math.floor(q.y), Math.floor(q.z))) {
+          wall = last;
+          break;
+        }
+        last = q;
+        if (p.kind === "tnt") continue;
+        for (const t of this.alivePlayers()) {
+          if (t.id === p.owner || (owner && this.sameTeam(owner, t))) continue;
+          const hw = PLAYER_HALF_WIDTH * t.size + 0.15;
+          if (Math.abs(q.x - t.x) <= hw && Math.abs(q.z - t.z) <= hw && q.y >= t.y - 0.1 && q.y <= t.y + PLAYER_HEIGHT * t.size + 0.1) {
+            hit = t;
+            break;
+          }
+        }
+      }
+      if (!hit && !wall) {
+        Object.assign(p, to);
+        if (p.y < FALL_OUT_Y || now - p.bornAt > PROJ_LIFE_MS + (p.kind === "tnt" ? TNT_FUSE_MS : 0)) this.projectiles.delete(p.id);
+        continue;
+      }
+      if (p.kind === "tnt") {
+        // Lands on the block it hit and lies there until the fuse runs out.
+        Object.assign(p, { x: last.x, z: last.z, vx: 0, vy: 0, vz: 0, landed: true });
+        p.y = this.groundBelow(this.arena, last.x, last.y, last.z);
+        continue;
+      }
+      this.projectiles.delete(p.id);
+      if (p.kind === "snowball" && hit) {
+        this.snowballHit(p, owner, hit, now);
+        if (this.phase !== "playing") return;
+      }
+      if (p.kind === "pearl") {
+        if (hit) this.snowballHit({ ...p, vx: p.vx * 0.4, vz: p.vz * 0.4 }, owner, hit, now);
+        if (owner) this.pearlLand(owner, hit ? { x: hit.x, y: hit.y, z: hit.z } : last, now);
+        if (this.phase !== "playing") return;
+      }
+    }
+  }
+
+  private snowballHit(p: { vx: number; vz: number }, owner: Client | null, t: Client, now: number): void {
+    const len = Math.hypot(p.vx, p.vz) || 1;
+    const kb = SNOWBALL_KNOCKBACK * buffModifiers(this.currentBuffs, this.mode, t.size).knockback;
+    if (owner) {
+      t.lastHitBy = owner.id;
+      t.lastHitAt = now;
+    }
+    if (this.blocked(t, now)) return this.blockedHit(t, owner?.id ?? 0, (p.vx / len) * kb * SHIELD_KNOCKBACK, 2, (p.vz / len) * kb * SHIELD_KNOCKBACK, now, true);
+    const kx = r2((p.vx / len) * kb);
+    const kz = r2((p.vz / len) * kb);
+    const kn = this.push(t, kx, 4.5, kz, now);
+    this.sendTo(this.viewers("arena"), { t: "hurt", id: t.id, by: owner?.id ?? 0, hp: t.hp, dmg: 0, crit: false, kx, ky: 4.5, kz, kn, arrow: true });
+  }
+
+  /** Ender pearl: the thrower lands where it did (on top of what it hit), losing a heart. */
+  private pearlLand(c: Client, at: Vec3, now: number): void {
+    if (!c.alive || c.loc !== "arena" || this.phase !== "playing") return;
+    const x = r2(Math.max(-ARENA_RADIUS + 1, Math.min(ARENA_RADIUS - 1, at.x)));
+    const z = r2(Math.max(-ARENA_RADIUS + 1, Math.min(ARENA_RADIUS - 1, at.z)));
+    let y = this.groundBelow(this.arena, x, Math.max(0, at.y + 0.5), z);
+    // No room to stand there (under a roof): climb to the first gap above.
+    while (y < MAX_HEIGHT - 2 && (this.arena.vox.get(Math.floor(x), y, Math.floor(z)) || this.arena.vox.get(Math.floor(x), y + 1, Math.floor(z)))) y++;
+    if (y >= MAX_HEIGHT - 2) return;
+    Object.assign(c, { x, y, z });
+    c.seenAt = [];
+    this.teleport(c);
+    if (!MODES[this.mode].noDamage && c.hp > 1) {
+      const dmg = Math.min(PEARL_DAMAGE, c.hp - 1);
+      c.hp -= dmg;
+      c.lastDamageAt = now;
+      c.nextRegenAt = 0;
+      this.sendTo(this.viewers("arena"), { t: "hurt", id: c.id, by: 0, hp: c.hp, dmg, crit: false, kx: 0, ky: 0, kz: 0, kn: 0 });
+    }
+    this.sendYou(c);
+  }
+
+  private sendChests(): void {
+    this.sendTo(this.viewers("arena"), { t: "chests", chests: [...this.chests.values()] });
+  }
+
+  /** A chest on a free spot of the map (on its structures when there are any). */
+  private spawnChest(send = true): boolean {
+    if (this.chests.size >= CHEST_MAX) return false;
+    const alive = this.alivePlayers();
+    const r = Math.max(3, this.floorR - 2);
+    const fine = (x: number, z: number) =>
+      cellInRing(Math.floor(x), Math.floor(z), r) &&
+      [...this.chests.values()].every((ch) => Math.hypot(ch.x - x, ch.z - z) > 6) &&
+      alive.every((p) => Math.hypot(p.x - x, p.z - z) > 3);
+    const spots = shuffle(this.chestSpots);
+    for (let i = 0; i < 40; i++) {
+      let x: number;
+      let z: number;
+      if (i < spots.length && i < 25) {
+        x = spots[i].x + 0.5;
+        z = spots[i].z + 0.5;
+      } else {
+        const a = Math.random() * Math.PI * 2;
+        const d = Math.sqrt(Math.random()) * (r - 1);
+        x = Math.floor(Math.cos(a) * d) + 0.5;
+        z = Math.floor(Math.sin(a) * d) + 0.5;
+      }
+      if (!fine(x, z)) continue;
+      const y = this.standAt(x, z);
+      if (y === null || (this.mode === "spleef" && y === 0)) continue;
+      const id = this.nextChestId++;
+      this.chests.set(id, { id, x, y, z });
+      if (send) this.sendChests();
+      return true;
+    }
+    return false;
+  }
+
+  private chestTick(now: number): void {
+    if (!this.chestsOn) return;
+    if (!this.nextChestAt) this.nextChestAt = now + this.timings.buffIntervalMs / 3;
+    if (now >= this.nextChestAt) {
+      this.nextChestAt = now + this.timings.buffIntervalMs / 3;
+      const cap = Math.min(CHEST_MAX, 2 + Math.ceil(this.alivePlayers().length / 2));
+      if (this.chests.size < cap) this.spawnChest();
+    }
+    if (!this.chests.size) return;
+    let changed = false;
+    for (const ch of [...this.chests.values()]) {
+      // Blown up or dug out from under: a chest needs something to stand on.
+      if (this.standAt(ch.x, ch.z) !== ch.y) {
+        this.chests.delete(ch.id);
+        changed = true;
+        continue;
+      }
+      const p = this.alivePlayers().find((q) => Math.hypot(q.x - ch.x, q.z - ch.z) < CHEST_PICKUP && Math.abs(q.y - ch.y) < 1.5);
+      if (!p) continue;
+      this.chests.delete(ch.id);
+      changed = true;
+      this.openChest(p, now);
+    }
+    if (changed) this.sendChests();
+  }
+
+  private openChest(p: Client, now: number): void {
+    const skip = LOOT_SKIP[this.mode] ?? [];
+    const pool = LOOT.filter(([it]) => !skip.includes(it));
+    let roll = Math.random() * pool.reduce((n, [, w]) => n + w, 0);
+    const [item, , count] = pool.find(([, w]) => (roll -= w) < 0) ?? pool[0];
+    const i = ITEM_IDS.indexOf(item);
+    p.items[i] = Math.min(ITEM_MAX, p.items[i] + count);
+    p.stats.chests++;
+    this.hint(p, `Сундук: ${ITEMS[item].title}${count > 1 ? ` ×${count}` : ""} · клавиша ${i + 1}`, now, true);
+    this.sendYou(p);
+  }
+
+  private shieldTick(now: number): void {
+    for (const p of this.alivePlayers()) {
+      if (!p.shieldUntil || now < p.shieldUntil) continue;
+      p.shieldUntil = 0;
+      this.rosterDirty = true;
+      this.sendYou(p);
+    }
+  }
+
+  // ---------------------------------------------------------------- bots
+
+  private botsTick(now: number): void {
+    const dt = TICK_MS / 1000;
+    const alive = this.alivePlayers();
+    if (!alive.some((p) => p.bot)) return;
+    const steps = crumbleSteps(this.timings, this.mode);
+    const nextR = this.crumbleWarned >= this.crumbleIndex ? (steps[this.crumbleIndex]?.r ?? null) : null;
+    const chests = [...this.chests.values()];
+    for (const b of alive) {
+      const brain = b.bot;
+      if (!brain || !b.alive) continue;
+      const enemies = this.alivePlayers()
+        .filter((o) => o !== b && !this.sameTeam(o, b))
+        .map((o) => ({ id: o.id, x: o.x, y: o.y, z: o.z, hp: o.hp, size: o.size }));
+      const intent = brain.think(b, {
+        now,
+        vox: this.arena.vox,
+        floorR: this.floorR,
+        nextR,
+        mode: this.mode,
+        enemies,
+        chests,
+        bomb: this.bomb?.holder.id ?? null,
+        lava: this.lavaY,
+        arrows: b.arrows,
+        items: b.items,
+        hp: b.hp,
+        maxHp: b.maxHp,
+        shielded: b.shieldUntil > now,
+      });
+      const mods = buffModifiers(this.currentBuffs, this.mode, b.size);
+      const body = brain.body;
+      stepBody(this.arena.vox, body, intent.input, dt, mods, Infinity);
+      b.x = body.pos.x;
+      b.y = body.pos.y;
+      b.z = body.pos.z;
+      b.yaw = intent.input.yaw;
+      b.pitch = clampPitch(intent.pitch);
+      b.hspeed = Math.hypot(body.vel.x, body.vel.z);
+      b.lastMoveAt = b.lastActiveAt = now;
+      if (b.y < FALL_OUT_Y) {
+        this.fallOut(b, now);
+        if (this.phase !== "playing") return;
+        continue;
+      }
+      const t = intent.attack !== null ? this.clients.get(intent.attack) : undefined;
+      if (t && t.alive && t.loc === "arena" && t.role === "player" && !this.sameTeam(b, t) && this.botReaches(b, t)) {
+        b.lastAttackAt = now;
+        if (brain.hitLanded()) {
+          const crit = !intent.input.sprint && body.vel.y < -1 && !body.onGround;
+          const sprint = !!intent.input.sprint && b.hspeed >= WALK_SPEED * mods.speed * 0.8;
+          this.strike(b, t, now, crit, sprint);
+          if (crit) b.stats.crits++;
+        }
+      }
+      if (intent.use && b.alive) this.useItem(b, intent.use, b.yaw, b.pitch, now);
+      if (intent.shoot && b.alive) this.fireArrow(b, b.yaw, b.pitch, now);
+      if (this.phase !== "playing") return;
+    }
+  }
+
+  /** The same reach and wall rules as a player's hit, from where the bot is now. */
+  private botReaches(b: Client, t: Client): boolean {
+    const eye = { x: b.x, y: b.y + EYE_HEIGHT * b.size, z: b.z };
+    const pad = PLAYER_HALF_WIDTH * t.size;
+    const min = { x: t.x - pad, y: t.y, z: t.z - pad };
+    const max = { x: t.x + pad, y: t.y + PLAYER_HEIGHT * t.size, z: t.z + pad };
+    if (boxDistance(eye, min, max) > HIT_REACH) return false;
+    const mid = { x: t.x, y: t.y + PLAYER_HEIGHT * t.size * 0.55, z: t.z };
+    return segmentClear(this.arena.vox, eye, mid, Math.floor(mid.x), Math.floor(mid.y), Math.floor(mid.z));
+  }
+
+  private botEmote(b: Client, e: EmoteId): void {
+    if (b.bot && b.alive) this.sendTo(this.viewers("arena"), { t: "emote", id: b.id, e });
+  }
+
+  // ---------------------------------------------------------------- quick chat
+
+  private onEmote(c: Client, m: Extract<ClientMsg, { t: "emote" }>, now: number): void {
+    if (!EMOTE_IDS.includes(m.e)) return this.flag(c, "packet", 1, "malformed emote");
+    if (now - c.lastEmoteAt < EMOTE_GAP_MS) return;
+    c.lastEmoteAt = now;
+    c.lastActiveAt = now;
+    const msg: ServerMsg = { t: "emote", id: c.id, e: m.e };
+    if (m.e === "point" && finite(m.x, m.y, m.z) && Math.hypot((m.x as number) - c.x, (m.z as number) - c.z) < 80) {
+      Object.assign(msg, { x: r2(m.x as number), y: r2(Math.max(-1, Math.min(MAX_HEIGHT, m.y as number))), z: r2(m.z as number) });
+    }
+    this.sendTo(this.viewers(this.viewOf(c)), msg);
   }
 
   private pickupBags(): void {
@@ -2015,17 +2696,24 @@ export class PvpServer {
       return;
     }
     const active = this.hubWalkers().filter((c) => now - c.lastActiveAt < AFK_MS && !this.inDuel(c));
-    if (active.length < MIN_PLAYERS) {
+    const need = this.needPlayers();
+    if (active.length < need) {
       this.startAt = null;
       return;
     }
     const ready = active.filter((c) => c.ready).length;
-    if (this.startAt === null) this.startAt = now + this.timings.lobbyMs;
-    if (ready >= MIN_PLAYERS && ready * 2 > active.length) this.startAt = Math.min(this.startAt, now + this.timings.readyMs);
+    // Alone with bots: a shorter wait, someone else may still come.
+    if (this.startAt === null) this.startAt = now + (active.length < MIN_PLAYERS ? this.timings.lobbyMs / 2 : this.timings.lobbyMs);
+    if (ready >= need && ready * 2 > active.length) this.startAt = Math.min(this.startAt, now + this.timings.readyMs);
     if (now >= this.startAt) {
       this.startAt = null;
       this.startRound(active, now);
     }
+  }
+
+  /** People it takes to start a round: one is enough when bots fill it up. */
+  private needPlayers(): number {
+    return this.botFill >= MIN_PLAYERS ? 1 : MIN_PLAYERS;
   }
 
   private sendHub(c: Client, now: number, force: boolean): void {
@@ -2037,10 +2725,11 @@ export class PvpServer {
       startIn: this.startAt === null ? null : Math.max(0, this.startAt - now),
       ready: active.filter((w) => w.ready).length,
       active: active.length,
-      need: MIN_PLAYERS,
+      need: this.needPlayers(),
       votes,
       myVote: c.vote,
       inRound: this.alivePlayers().length,
+      bots: this.botFill,
     };
     const key = JSON.stringify({ ...msg, startIn: this.startAt });
     if (!force && key === c.hubKey && now - c.hubSentAt < HUB_REFRESH_MS) return;
@@ -2326,7 +3015,8 @@ export class PvpServer {
     if (!viewers.length) return;
     const mods = buffModifiers(this.phase === "playing" ? this.currentBuffs : null);
     const a = this.arenaArrows.size ? [...this.arenaArrows.values()].flatMap((x) => [x.id, r2(x.x), r2(x.y), r2(x.z), r2(x.vx), r2(x.vy), r2(x.vz)]) : null;
-    const tick = (p: number[]): ServerMsg => (a ? { t: "tick", s, p, a } : { t: "tick", s, p });
+    const pr = this.projectiles.size ? [...this.projectiles.values()].flatMap((x) => [x.id, PROJ_KINDS.indexOf(x.kind), r2(x.x), r2(x.y), r2(x.z), r2(x.vx), r2(x.vy), r2(x.vz)]) : null;
+    const tick = (p: number[]): ServerMsg => ({ t: "tick", s, p, ...(a ? { a } : {}), ...(pr ? { pr } : {}) });
     if (!mods.night && !mods.invisible) {
       this.sendTo(viewers, tick(alive.flatMap(row)));
       return;
@@ -2386,6 +3076,7 @@ export class PvpServer {
 
   /** Sends the player to the server's position for them; moves already in flight get dropped. */
   private teleport(c: Client, yaw?: number): void {
+    if (c.bot) c.bot.moveTo(c);
     c.tpSeq++;
     c.motion.synced = false;
     c.motion.vy = 0;
@@ -2648,10 +3339,20 @@ export class PvpServer {
   private hitArena(c: Client, t: Client, m: Extract<ClientMsg, { t: "hit" }>, now: number): void {
     if (this.strikeProblem(c, t, m, now, this.arena)) return;
     if (this.sameTeam(c, t)) return this.hint(c, "Это союзник", now);
+    const mods = buffModifiers(this.currentBuffs, this.mode, c.size);
+    this.strike(c, t, now, this.isCrit(c, this.arena, now), this.sprintHit(c, now, mods));
+  }
+
+  /** A sword hit that counts (checked already, or a bot's): damage, knockback, the bomb. */
+  private strike(c: Client, t: Client, now: number, crit: boolean, sprint: boolean): void {
     const buffs = this.currentBuffs;
     const mods = buffModifiers(buffs, this.mode, c.size);
-    const crit = this.isCrit(c, this.arena, now);
-    const sprint = this.sprintHit(c, now, mods);
+    if (this.blocked(t, now)) {
+      t.lastHitBy = c.id;
+      t.lastHitAt = now;
+      const k = this.knock(c, t.x, t.z, buffModifiers(buffs, this.mode, t.size), sprint);
+      return this.blockedHit(t, c.id, k.kx * SHIELD_KNOCKBACK, k.ky * 0.6, k.kz * SHIELD_KNOCKBACK, now);
+    }
     let base = (mods.berserk ? HIT_DAMAGE * (1 + 2 * (1 - c.hp / c.maxHp)) : HIT_DAMAGE) * sizeStats(c.size).damage;
     if (this.mode === "infection" && c.team === 1) base *= ZOMBIE_DAMAGE;
     // Overtime is sudden death; one-shot kills even a giant.
@@ -2674,8 +3375,8 @@ export class PvpServer {
     }
     const { kx, ky, kz } = this.knock(c, t.x, t.z, buffModifiers(buffs, this.mode, t.size), sprint);
     const alive = t.hp > 0;
-    if (alive) t.motion.credits.push(knockbackCredit(now, ++t.kbSeq, kx, ky, kz));
-    this.sendTo(this.viewers("arena"), { t: "hurt", id: t.id, by: c.id, hp: t.hp, dmg, crit, kx, ky, kz, kn: alive ? t.kbSeq : 0 });
+    const kn = alive ? this.push(t, kx, ky, kz, now) : 0;
+    this.sendTo(this.viewers("arena"), { t: "hurt", id: t.id, by: c.id, hp: t.hp, dmg, crit, kx, ky, kz, kn });
     const bomb = this.bomb;
     if (alive && bomb && bomb.holder === c && !(t.id === bomb.from && now - bomb.at < BOMB_TAGBACK_MS)) this.giveBomb(t, now, c.id, bomb.until);
     if (!alive) return this.eliminate(t, c, "kill");
@@ -2880,7 +3581,8 @@ export class PvpServer {
     c.lastActiveAt = now;
     if (hub) {
       this.hubPlaced.delete(Voxels.index(x, y, z));
-    } else if (this.mode !== "spleef") {
+    } else if (this.mode !== "spleef" && (w.vox.get(x, y, z) === BLOCK.dirt || w.vox.get(x, y, z) === BLOCK.grass)) {
+      // Only earth gives earth back: the map's stone, wood and leaves just break.
       c.dirt++;
       this.sendYou(c);
     }
@@ -2904,7 +3606,8 @@ export class PvpServer {
 
   private sendYou(c: Client): void {
     const respawnIn = c.respawnAt ? Math.max(0, c.respawnAt - Date.now()) : 0;
-    this.send(c, { t: "you", hp: c.hp, maxHp: c.maxHp, dirt: c.dirt, arrows: c.arrows, alive: c.alive, role: c.role, watching: c.watching, respawnIn });
+    const shieldMs = c.shieldUntil ? Math.max(0, c.shieldUntil - Date.now()) : 0;
+    this.send(c, { t: "you", hp: c.hp, maxHp: c.maxHp, dirt: c.dirt, arrows: c.arrows, alive: c.alive, role: c.role, watching: c.watching, respawnIn, items: c.items, shieldMs });
   }
 
   private broadcastRoster(): void {
@@ -2926,6 +3629,10 @@ export class PvpServer {
         size: c.size,
         maxHp: c.maxHp,
         score: c.score,
+        bot: !!c.bot,
+        shield: c.shieldUntil > 0,
+        sword: c.sword,
+        level: c.profileId ? this.profiles.stats(c.profileId).level : 0,
       }));
     this.broadcast({ t: "roster", players });
   }

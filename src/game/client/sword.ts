@@ -1,20 +1,15 @@
 import * as THREE from "three";
+import { SWORDS, SWORD_KINDS } from "../shared";
+import type { SwordKind } from "../shared";
 
 // A Minecraft-style sword: a 16×16 sprite extruded one pixel thick (like Minecraft's generated item
 // models), held and swung with the same transforms as Minecraft Java (ItemInHandRenderer,
 // item/handheld.json and HumanoidModel). The model lives in item space, the unit cube [0, 1]³ with
 // the sprite in the z = 0.5 plane: texture x → +x, texture y → −y.
 
-export type SwordKind = "wood" | "stone" | "iron" | "gold" | "diamond" | "netherite";
-export const SWORD_KINDS: SwordKind[] = ["wood", "stone", "iron", "gold", "diamond", "netherite"];
-export const SWORD_TITLES: Record<SwordKind, string> = {
-  wood: "Деревянный",
-  stone: "Каменный",
-  iron: "Железный",
-  gold: "Золотой",
-  diamond: "Алмазный",
-  netherite: "Незеритовый",
-};
+export type { SwordKind };
+export { SWORD_KINDS };
+export const SWORD_TITLES = Object.fromEntries(SWORD_KINDS.map((k) => [k, SWORDS[k].title])) as Record<SwordKind, string>;
 
 /** "modern": Minecraft 1.9+, the sword dips after a hit and comes back up as the cooldown runs out.
  *  "classic": Minecraft 1.8, no dip. */

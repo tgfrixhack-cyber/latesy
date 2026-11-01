@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import { ARENA_RADIUS, BLOCK_TYPES, SPAWN_RADIUS, Voxels, cellInRing } from "../shared";
+import { ARENA_RADIUS, SPAWN_RADIUS, Voxels, cellInRing } from "../shared";
+import { ATLAS_TILES, blockTile } from "./textures";
 
 const R = ARENA_RADIUS;
 /** Vertex brightness by ambient-occlusion level (0 = most occluded), Minecraft-style. */
@@ -173,11 +174,10 @@ const FACE_CORNERS = [
 /** Inset (in tile fractions) that keeps nearest-filtered samples from landing on a neighbouring atlas tile. */
 const TILE_INSET = 0.004;
 
-/** Maps a 0..1 face UV into the atlas tile of a block type; unknown types fall back to dirt. */
-function atlasUv(type: number, u: number, v: number) {
-  const tile = type >= 1 && type <= BLOCK_TYPES ? type - 1 : 0;
+/** Maps a 0..1 face UV into an atlas tile (see blockTile). */
+function atlasUv(tile: number, u: number, v: number) {
   const span = 1 - 2 * TILE_INSET;
-  return [(tile + TILE_INSET + u * span) / BLOCK_TYPES, TILE_INSET + v * span];
+  return [(tile + TILE_INSET + u * span) / ATLAS_TILES, TILE_INSET + v * span];
 }
 
 /** Meshes player blocks: hidden faces culled, per-vertex ambient occlusion in vertex colours. */
@@ -194,6 +194,7 @@ export function buildBlockGeometry(world: Voxels) {
         if (occupied(world, l[0], l[1], l[2])) continue;
         const u = (axis + 1) % 3;
         const v = (axis + 2) % 3;
+        const tile = blockTile(type, axis, s);
         const corners: number[][] = [];
         const uvs: number[][] = [];
         const ao: number[] = [];
@@ -204,7 +205,7 @@ export function buildBlockGeometry(world: Voxels) {
           q[u] += cu;
           q[v] += cv;
           corners.push(q);
-          uvs.push(axis === 0 ? atlasUv(type, cv, cu) : atlasUv(type, cu, cv));
+          uvs.push(axis === 0 ? atlasUv(tile, cv, cu) : atlasUv(tile, cu, cv));
           const du = cu ? 1 : -1;
           const dv = cv ? 1 : -1;
           const s1 = [...l];

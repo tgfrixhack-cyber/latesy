@@ -75,7 +75,8 @@ after(() => servers.forEach((s) => s.close()));
 
 export async function startServer(opts: ServerOptions = {}): Promise<TestServer> {
   const violations: Violation[] = [];
-  const game = new PvpServer({ timeScale: 0.05, recordsFile: null, buffPlan: [], ...opts, anticheat: { maxConnPerIp: 0, ...opts.anticheat }, onViolation: (v) => violations.push(v) });
+  // The original flat island without chests or bots, unless a test asks for them.
+  const game = new PvpServer({ timeScale: 0.05, recordsFile: null, profilesFile: null, terrain: false, chests: false, bots: 0, buffPlan: [], ...opts, anticheat: { maxConnPerIp: 0, ...opts.anticheat }, onViolation: (v) => violations.push(v) });
   const http = createServer();
   http.on("upgrade", (req, socket, head) => {
     if (!game.handleUpgrade(req, socket, head)) socket.destroy();
@@ -193,6 +194,13 @@ export class Bot {
   /** Timestamped teleports and knockback received, to explain a failure. */
   log: string[] = [];
   closed: { code: number; reason: string } | null = null;
+  /** Private room code from `welcome`. */
+  room: string | null = null;
+  /** Item counts (ITEM_IDS order) and the raised shield's time left, from `you`. */
+  items: number[] = [];
+  shieldMs = 0;
+  /** Messages this class doesn't track otherwise (chests, profile, reward, emote…). */
+  other: ServerMsg[] = [];
   /** Anti-knockback cheats: drop the velocity but still acknowledge it, or don't even acknowledge. */
   ignoreKnockback: false | "ack" | "silent" = false;
   /** Reported with every move (the browser's sprint state): sprinting now or since the last move. */
@@ -215,13 +223,13 @@ export class Bot {
     this.ws.on("error", () => {});
   }
 
-  static async join(url: string, name: string, net: Net = LAN, ip?: string, version = PROTOCOL_VERSION): Promise<Bot> {
+  static async join(url: string, name: string, net: Net = LAN, ip?: string, version = PROTOCOL_VERSION, hello: Record<string, unknown> = {}): Promise<Bot> {
     const bot = new Bot(url, net, ip);
     await new Promise<void>((resolve, reject) => {
       bot.ws.once("open", () => resolve());
       bot.ws.once("unexpected-response", () => reject(new Error("upgrade refused")));
     });
-    bot.ws.send(JSON.stringify({ t: "hello", name, v: version }));
+    bot.ws.send(JSON.stringify({ t: "hello", name, v: version, ...hello }));
     return bot;
   }
 
@@ -258,6 +266,7 @@ export class Bot {
     switch (m.t) {
       case "welcome":
         this.id = m.id;
+        this.room = m.room;
         break;
       case "phase":
         this.phase = m.phase;
@@ -381,6 +390,8 @@ export class Bot {
         this.alive = m.alive;
         this.watching = m.watching;
         this.respawnIn = m.respawnIn;
+        this.items = m.items;
+        this.shieldMs = m.shieldMs;
         break;
       case "tp":
         this.log.push(`${Date.now()} tp n=${m.n} ${m.x.toFixed(2)},${m.y.toFixed(2)},${m.z.toFixed(2)}`);
@@ -405,7 +416,15 @@ export class Bot {
           if (m.ky) this.body.vel.y = Math.max(this.body.vel.y, m.ky);
         }
         break;
+      default:
+        this.other.push(m);
     }
+  }
+
+  /** The last message of a kind this class doesn't track otherwise. */
+  last<T extends ServerMsg["t"]>(t: T): Extract<ServerMsg, { t: T }> | undefined {
+    for (let i = this.other.length - 1; i >= 0; i--) if (this.other[i].t === t) return this.other[i] as Extract<ServerMsg, { t: T }>;
+    return undefined;
   }
 
   /** The browser's onFloor: blocks past the island's edge fall with it. */
