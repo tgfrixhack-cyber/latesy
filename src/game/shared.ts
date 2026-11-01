@@ -490,7 +490,8 @@ export interface Body {
 }
 
 export interface MoveInput {
-  /** -1, 0 or 1. */
+  /** -1..1 each: keys give whole steps, a touch stick anything in between (less than full tilt
+   *  walks slower; a diagonal never goes faster). */
   forward: number;
   strafe: number;
   jump: boolean;
@@ -507,8 +508,9 @@ export function stepBody(world: Voxels, b: Body, input: MoveInput, dt: number, m
   const len = Math.hypot(wx, wz);
   const speed = WALK_SPEED * mods.speed * (input.sprint ? SPRINT_SPEED : 1);
   if (len) {
-    wx = (wx / len) * speed;
-    wz = (wz / len) * speed;
+    const amount = Math.min(1, len);
+    wx = (wx / len) * speed * amount;
+    wz = (wz / len) * speed * amount;
   }
   const accel = 1 - Math.exp(-(b.onGround ? mods.groundAccel : AIR_ACCEL) * dt);
   b.vel.x += (wx - b.vel.x) * accel;
