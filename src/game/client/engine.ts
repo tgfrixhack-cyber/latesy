@@ -256,6 +256,23 @@ function createProjectile(kind: ProjKind) {
 
 const GESTURES: Partial<Record<EmoteId, Gesture>> = { wave: "wave", point: "point" };
 
+/** Touch look: radians per CSS pixel of a swipe at sensitivity 1×. */
+const TOUCH_LOOK = 0.0062;
+/** Touch stick: a push past this share of its reach, mostly forward, starts a sprint. */
+const STICK_SPRINT = 0.92;
+/** Touch aim assist: how far off the crosshair (degrees) an enemy in reach may be. */
+const ASSIST_DEG = 20;
+const ASSIST_KEY = "pvp-aim-assist";
+
+/** Phones and tablets: a coarse pointer and nothing to hover with. */
+export function isTouchDevice(): boolean {
+  try {
+    return matchMedia("(pointer: coarse)").matches && !matchMedia("(any-pointer: fine)").matches;
+  } catch {
+    return false;
+  }
+}
+
 /** Emote wheel (hold E): radius, the dead zone in its middle, and how long E must be held next to
  *  the wardrobe before it opens (a tap there opens the wardrobe). */
 export const WHEEL_R = 120;
@@ -319,6 +336,14 @@ function loadLook(): { color: string; skin: SkinId; sword: SwordKind } | null {
     // Private mode or a broken value: fall back to the server's choice.
   }
   return null;
+}
+
+function loadAimAssist(): boolean {
+  try {
+    return localStorage.getItem(ASSIST_KEY) !== "0";
+  } catch {
+    return true;
+  }
 }
 
 function loadSens(): number {
@@ -417,7 +442,9 @@ export class Engine {
   /** Open emote wheel: its centre (moved inside the view near an edge), the point where E was pressed,
    *  the pointer's offset from that point, the hovered sector; `shown` stays false for the first
    *  moments next to the wardrobe. */
-  private wheel: { cx: number; cy: number; px: number; py: number; vx: number; vy: number; sel: number | null; shown: boolean; wardrobe: boolean } | null = null;
+  private wheel: { cx: number; cy: number; px: number; py: number; vx: number; vy: number; sel: number | null; shown: boolean; wardrobe: boolean; sticky: boolean } | null = null;
+  /** Touch stick: strafe (x, right +) and forward (y, up +), each -1..1; null while not held. */
+  private stick: { x: number; y: number } | null = null;
   private wheelTimer = 0;
   /** Where the (unlocked) cursor last was over the game view. */
   private cursor = { x: 0, y: 0, seen: false };
@@ -504,10 +531,12 @@ export class Engine {
     setLabelFont(style.fontFamily);
     setPixelFont(style.getPropertyValue("--font-pixel"));
     const look = loadLook();
-    this.store.set({ muted: sfx.muted, sens: this.sens, ...(look ? { look } : {}) });
+    this.store.set({ muted: sfx.muted, sens: this.sens, touch: isTouchDevice(), aimAssist: loadAimAssist(), ...(look ? { look } : {}) });
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Phones: fewer pixels and a smaller shadow map keep the frame rate up.
+    const touch = isTouchDevice();
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, touch ? 1.5 : 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
@@ -523,7 +552,7 @@ export class Engine {
     this.sun = sun;
     sun.position.set(30, 70, 20);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(touch ? 1024 : 2048, touch ? 1024 : 2048);
     const sc = sun.shadow.camera;
     sc.left = -54;
     sc.right = 54;
@@ -647,6 +676,7 @@ export class Engine {
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("blur", this.onBlur);
+    window.addEventListener("pointerdown", this.onAnyPointer, true);
     document.addEventListener("mousemove", this.onMouseMove);
     document.addEventListener("pointerlockchange", this.onLockChange);
 
@@ -710,7 +740,7 @@ export class Engine {
     const px = free ? this.cursor.x : r.width / 2;
     const py = free ? this.cursor.y : r.height / 2;
     const wardrobe = s.view === "hub" && !s.watching && s.nearWardrobe && !this.inDuel();
-    this.wheel = { cx: fit(px, r.width), cy: fit(py, r.height), px, py, vx: 0, vy: 0, sel: null, shown: false, wardrobe };
+    this.wheel = { cx: fit(px, r.width), cy: fit(py, r.height), px, py, vx: 0, vy: 0, sel: null, shown: false, wardrobe, sticky: false };
     this.mouse.left = this.mouse.right = false;
     window.clearTimeout(this.wheelTimer);
     if (wardrobe) this.wheelTimer = window.setTimeout(this.showWheel, WHEEL_HOLD_MS);
@@ -721,7 +751,7 @@ export class Engine {
     const w = this.wheel;
     if (!w) return;
     w.shown = true;
-    this.store.set({ emoteWheel: { x: w.cx, y: w.cy, sel: w.sel } });
+    this.store.set({ emoteWheel: { x: w.cx, y: w.cy, sel: w.sel, sticky: w.sticky } });
   };
 
   /** E released (`confirm`): the hovered emote goes out; a quick tap at the wardrobe opens it. */
@@ -759,7 +789,191 @@ export class Engine {
     const sel = wheelSector(w.vx, w.vy);
     if (sel === w.sel) return;
     w.sel = sel;
-    if (w.shown) this.store.set({ emoteWheel: { x: w.cx, y: w.cy, sel } });
+    if (w.shown) this.store.set({ emoteWheel: { x: w.cx, y: w.cy, sel, sticky: w.sticky } });
+  }
+
+  // ------------------------------------------------------------------ touch controls
+
+  /** Touch controls on or off (the last pointer used decides; the UI can force it). */
+  setTouch(on: boolean) {
+    if (this.store.get().touch === on) return;
+    this.store.set({ touch: on });
+    if (!on) this.touchRelease();
+  }
+
+  /** A finger on any control: touch mode. A real mouse click: back to mouse and keyboard. */
+  private onAnyPointer = (e: PointerEvent) => {
+    if (e.pointerType === "touch") this.setTouch(true);
+    else if (e.pointerType === "mouse") this.setTouch(false);
+  };
+
+  /** Lets go of every touch control (fingers lifted, focus lost, mode change). */
+  touchRelease() {
+    this.stick = null;
+    this.mouse.left = this.mouse.right = false;
+    this.keys.delete("Space");
+    this.keys.delete("ShiftLeft");
+  }
+
+  /** Touch stick: x right, y forward, both -1..1 (null: let go). Pushed to the rim, mostly forward,
+   *  it sprints, like Minecraft's touch controls. */
+  touchStick(x: number, y: number) {
+    this.stick = { x: Math.max(-1, Math.min(1, x)), y: Math.max(-1, Math.min(1, y)) };
+    const full = Math.hypot(x, y) >= STICK_SPRINT && y > 0.7 * Math.hypot(x, y);
+    if (full && !this.sprinting && this.mode === "play" && this.body.onGround) this.sprinting = true;
+  }
+
+  touchStickEnd() {
+    this.stick = null;
+  }
+
+  /** A swipe: turns the view by the finger's movement in CSS pixels. */
+  touchLook(dx: number, dy: number) {
+    const k = TOUCH_LOOK * this.sens;
+    const lim = Math.PI / 2 - 0.01;
+    if (this.mode === "spectate") {
+      this.specYaw -= dx * k;
+      this.specPitch = Math.max(-lim, Math.min(lim, this.specPitch - dy * k));
+    } else if (this.mode === "play" || this.mode === "frozen") {
+      this.yaw -= dx * k;
+      this.pitch = Math.max(-lim, Math.min(lim, this.pitch - dy * k));
+    }
+  }
+
+  /** Held buttons: jump (in free spectating: up), down (free spectating), attack and place. */
+  touchButton(button: "jump" | "down" | "attack" | "place", on: boolean) {
+    if (button === "jump" || button === "down") {
+      const code = button === "jump" ? "Space" : "ShiftLeft";
+      if (on) this.keys.add(code);
+      else this.keys.delete(code);
+      return;
+    }
+    if (this.mode === "spectate") {
+      if (on) this.cycleTarget(button === "attack" ? 1 : -1);
+      return;
+    }
+    if (button === "attack") {
+      this.mouse.left = on;
+      if (on) this.primaryAction(true);
+    } else {
+      this.mouse.right = on;
+      if (on) this.secondaryAction(true);
+    }
+  }
+
+  /** V: first/third person, or the next spectator camera. */
+  toggleView() {
+    const mode = this.mode;
+    if (mode === "play" || mode === "frozen") this.thirdPerson = !this.thirdPerson;
+    else if (mode === "spectate") this.nextSpecMode();
+  }
+
+  private nextSpecMode() {
+    const order: SpecMode[] = ["third", "first", "free"];
+    this.specMode = order[(order.indexOf(this.specMode) + 1) % order.length];
+    if (this.specMode === "free") this.specPos.copy(this.camera.position);
+  }
+
+  /** Spectating: the next (1) or previous (-1) player. */
+  spectateNext(dir: number) {
+    if (this.mode === "spectate") this.cycleTarget(dir);
+  }
+
+  /** Bows buff: fire (the Q key). */
+  shootBow() {
+    if (this.mode === "play" && this.store.get().view === "arena") this.shoot();
+  }
+
+  /** F: challenge the player looked at in the hub. */
+  challengeDuel() {
+    const s = this.store.get();
+    if (s.duelTarget && !this.inDuel()) this.send({ t: "duel", id: s.duelTarget.id });
+  }
+
+  setAimAssist(on: boolean) {
+    this.store.set({ aimAssist: on });
+    try {
+      localStorage.setItem(ASSIST_KEY, on ? "1" : "0");
+    } catch {
+      // Kept for this session.
+    }
+  }
+
+  /** Touch emote button pressed: the wheel opens in the middle of the screen, the finger's drag
+   *  from the button picks a sector ("point" marks the spot under the crosshair). */
+  wheelTouchStart() {
+    const s = this.store.get();
+    if (s.wardrobe || s.help || s.profileOpen || this.wheel) return;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const cx = r.width / 2;
+    const cy = r.height / 2;
+    this.wheel = { cx, cy, px: cx, py: cy, vx: 0, vy: 0, sel: null, shown: false, wardrobe: false, sticky: false };
+    this.showWheel();
+  }
+
+  wheelTouchMove(dx: number, dy: number) {
+    if (this.wheel && !this.wheel.sticky) this.moveWheel(dx, dy, false);
+  }
+
+  /** Lifted on a sector: sent. Lifted without one (a tap): the wheel stays for a tap on a sector. */
+  wheelTouchEnd() {
+    const w = this.wheel;
+    if (!w || w.sticky) return;
+    if (w.sel !== null) return this.closeWheel(true);
+    w.sticky = true;
+    this.showWheel();
+  }
+
+  /** A tap while the wheel stays open: on a sector sends it, anywhere else closes the wheel. */
+  wheelTap(x: number, y: number) {
+    const w = this.wheel;
+    if (!w) return;
+    const dx = x - w.cx;
+    const dy = y - w.cy;
+    w.sel = Math.hypot(dx, dy) <= WHEEL_R + 16 ? wheelSector(dx, dy) : null;
+    this.closeWheel(w.sel !== null);
+  }
+
+  /** Touch aim assist: a swing with nobody under the crosshair turns to the nearest enemy in reach
+   *  a few degrees off it (not through blocks, never to the invisible). Returns true if it turned. */
+  private assistAim(): boolean {
+    const s = this.store.get();
+    if (!s.touch || !s.aimAssist) return false;
+    if (s.view === "arena" && s.phase === "playing" && s.buffs.includes("invisible")) return false;
+    const { origin, dir } = this.eyeRay();
+    if (this.pickTarget(origin, dir, HIT_REACH)) return false;
+    const me = s.players.find((p) => p.id === s.myId);
+    const teams = MODES[s.mode].teams !== null;
+    const list: [Avatar, boolean][] = [];
+    if (s.view === "arena") {
+      for (const a of this.avatars.values()) {
+        const p = s.players.find((pl) => pl.id === a.id);
+        if (teams && me?.team !== null && p?.team === me?.team) continue;
+        list.push([a, false]);
+      }
+    } else {
+      for (const a of this.mobs.values()) list.push([a, true]);
+      const d = s.duel;
+      const opp = d?.state === "fight" ? this.avatars.get(d.opponent) : undefined;
+      if (opp) list.push([opp, false]);
+    }
+    const max = (ASSIST_DEG * Math.PI) / 180;
+    let best: { yaw: number; pitch: number; off: number } | null = null;
+    for (const [a, mob] of list) {
+      const k = mob ? 1 : a.scale;
+      const to = new THREE.Vector3(a.pos.x, a.pos.y + PH * k * 0.6, a.pos.z).sub(origin);
+      const dist = to.length();
+      if (dist > HIT_REACH + HW * k || dist < 0.05) continue;
+      to.divideScalar(dist);
+      const off = Math.acos(Math.max(-1, Math.min(1, to.dot(dir))));
+      if (off > max || (best && off >= best.off)) continue;
+      if (this.raycast(origin, to, dist - 0.2)) continue;
+      best = { yaw: Math.atan2(-to.x, -to.z), pitch: Math.asin(to.y), off };
+    }
+    if (!best) return false;
+    this.yaw = best.yaw;
+    this.pitch = best.pitch;
+    return true;
   }
 
   setProfile(open: boolean) {
@@ -853,6 +1067,7 @@ export class Engine {
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("blur", this.onBlur);
+    window.removeEventListener("pointerdown", this.onAnyPointer, true);
     document.removeEventListener("mousemove", this.onMouseMove);
     document.removeEventListener("pointerlockchange", this.onLockChange);
     if (document.pointerLockElement === el) document.exitPointerLock();
@@ -1494,6 +1709,7 @@ export class Engine {
     const toMe = m.id === s.myId;
     const victim = this.avatars.get(m.id) ?? this.mobs.get(m.id);
     if (victim?.mob) victim.setHp(Math.max(0, m.hp));
+    if (s.touch && (toMe || (mine && !m.blocked))) navigator.vibrate?.(toMe ? (m.by ? 30 : 15) : 8);
     if (toMe) {
       if (m.kn) this.kbSeq = m.kn;
       this.vel.x += m.kx;
@@ -1941,13 +2157,9 @@ export class Engine {
     if (e.code === "KeyQ" && mode === "play" && s.view === "arena") this.shoot();
     if (/^Digit[123]$/.test(e.code) && s.vote && !s.alive) this.vote(Number(e.code.slice(5)) - 1);
     if (/^Digit[1-5]$/.test(e.code) && mode === "play" && s.view === "arena" && s.alive) this.useItem(Number(e.code.slice(5)) - 1);
-    if (inHub && e.code === "KeyF" && s.duelTarget && !this.inDuel()) this.send({ t: "duel", id: s.duelTarget.id });
+    if (inHub && e.code === "KeyF") this.challengeDuel();
     if (mode === "spectate") {
-      if (e.code === "KeyV") {
-        const order: SpecMode[] = ["third", "first", "free"];
-        this.specMode = order[(order.indexOf(this.specMode) + 1) % order.length];
-        if (this.specMode === "free") this.specPos.copy(this.camera.position);
-      }
+      if (e.code === "KeyV") this.nextSpecMode();
       if (e.code === "ArrowRight") this.cycleTarget(1);
       if (e.code === "KeyQ" || e.code === "ArrowLeft") this.cycleTarget(-1);
     }
@@ -1960,6 +2172,7 @@ export class Engine {
 
   private onBlur = () => {
     this.keys.clear();
+    this.stick = null;
     this.mouse.left = this.mouse.right = false;
     this.closeWheel(false);
   };
@@ -2107,6 +2320,7 @@ export class Engine {
   private primaryAction(fresh: boolean) {
     if (this.mode !== "play") return;
     const now = performance.now();
+    if (now - this.lastHitAt >= HIT_COOLDOWN_MS) this.assistAim();
     const { origin, dir } = this.eyeRay();
     const target = this.pickTarget(origin, dir, HIT_REACH);
     const block = this.raycast(origin, dir, BUILD_REACH);
@@ -2280,7 +2494,7 @@ export class Engine {
     const mods = this.mods();
     const k = this.keys;
     const forward = this.forwardInput();
-    const strafe = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
+    const strafe = this.stick ? this.stick.x : (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
     // The sprint ends once forward is let go (or S is held too), and after a head-on wall hit.
     const wasSprinting = this.sprinting;
     if (forward <= 0) this.sprinting = false;
@@ -2318,6 +2532,7 @@ export class Engine {
   }
 
   private forwardInput() {
+    if (this.stick) return this.stick.y;
     const k = this.keys;
     return (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
   }
@@ -2458,6 +2673,7 @@ export class Engine {
       if (k.has("KeyS") || k.has("ArrowDown")) move.sub(dir);
       if (k.has("KeyD")) move.add(right);
       if (k.has("KeyA")) move.sub(right);
+      if (this.stick) move.addScaledVector(dir, this.stick.y).addScaledVector(right, this.stick.x);
       if (k.has("Space")) move.y += 1;
       if (k.has("ShiftLeft") || k.has("ShiftRight")) move.y -= 1;
       if (move.lengthSq()) this.specPos.addScaledVector(move.normalize(), 14 * dt);
@@ -2557,6 +2773,9 @@ export class Engine {
     const invisible = arena && s.phase === "playing" && s.buffs.includes("invisible");
 
     if (mode !== this.prevMode) {
+      this.store.set({ inputMode: mode });
+      this.stick = null;
+      this.mouse.left = this.mouse.right = false;
       if (mode === "spectate") {
         this.specMode = "third";
         this.specTarget = null;
