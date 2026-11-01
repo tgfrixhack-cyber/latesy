@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { BLOCK_TYPES } from "../shared";
+import type { ItemId } from "../shared";
 
 // Procedural 16×16 pixel-art textures, so the game ships without image assets.
 
@@ -266,6 +267,144 @@ export function createTextures() {
     blockAtlas: blockAtlas(),
     planks: toTexture(planksCanvas[0], true),
   };
+}
+
+/** Item icons for the item bar, drawn as 16×16 pixel art ('.' is transparent). */
+const ITEM_PIXELS: Record<ItemId, { rows: string[]; pal: Record<string, string> }> = {
+  apple: {
+    rows: [
+      "................",
+      ".........s......",
+      "........s..ee...",
+      "........s.eEe...",
+      "...oooo.sooo....",
+      "..owwllo.lggo...",
+      ".owwllgggggddo..",
+      ".owlllggggggdo..",
+      ".olllgggggggdo..",
+      ".olggggggggddo..",
+      ".oggggggggdddo..",
+      "..oggggggdddo...",
+      "..ogggggdddoo...",
+      "...ooggdddo.....",
+      ".....ooooo......",
+      "................",
+    ],
+    pal: { o: "#6b4400", w: "#fffbd0", l: "#ffe36b", g: "#f2c22b", d: "#c9871c", s: "#5b3a1a", e: "#4caf3a", E: "#2a7a24" },
+  },
+  pearl: {
+    rows: [
+      "................",
+      "................",
+      ".....oooooo.....",
+      "....oddmmddo....",
+      "...odmmllmmdo...",
+      "..odmlwwllmmdo..",
+      "..omlwwllmmmdo..",
+      "..omlllmmmmmdo..",
+      "..ommlmccccmdo..",
+      "..odmmccccmddo..",
+      "..oddmmmmmddoo..",
+      "...oddddddddo...",
+      "....oddddddo....",
+      ".....oooooo.....",
+      "................",
+      "................",
+    ],
+    pal: { o: "#062a26", d: "#0f5a52", m: "#1c8a7c", l: "#3fc4b0", w: "#c9fff4", c: "#0a3d38" },
+  },
+  shield: {
+    rows: [
+      "................",
+      "..oooooooooooo..",
+      "..oLLLLLLLLLLo..",
+      "..oLwwwbwwwwio..",
+      "..oLwWwbwwWwio..",
+      "..oLwwwbwwwwio..",
+      "..oLwwBBBwwwio..",
+      "..oLbbBRBbbbio..",
+      "..oLwwBBBwwwio..",
+      "..oLwWwbwwWwio..",
+      "...oLwwbwwwio...",
+      "...oLwwbwwwio...",
+      "....oLwbwwio....",
+      ".....oLwwio.....",
+      "......oiio......",
+      ".......oo.......",
+    ],
+    pal: { o: "#2f3337", L: "#c9d0d6", i: "#7c838b", w: "#9a6b3c", W: "#b07d47", b: "#6b4825", B: "#aab2ba", R: "#e6ebef" },
+  },
+  snowball: {
+    rows: [
+      "................",
+      "................",
+      "................",
+      "......oooo......",
+      "....oowwwwoo....",
+      "...owwwwwwllo...",
+      "...owWwwwwllo...",
+      "..owWWwwwwllbo..",
+      "..owwwwwwlllbo..",
+      "..owwwwwlllbbo..",
+      "...owwllllbbo...",
+      "...olllllbbbo...",
+      "....oobbbboo....",
+      "......oooo......",
+      "................",
+      "................",
+    ],
+    pal: { o: "#5b7f99", w: "#f8fcff", W: "#ffffff", l: "#d6e9f7", b: "#a9c8de" },
+  },
+  tnt: {
+    rows: [
+      ".......f........",
+      "......f.f.......",
+      ".......s........",
+      ".oooooooooooooo.",
+      ".otrtrtrtrtrtro.",
+      ".oRrRrRrRrRrRro.",
+      ".oRrRrRrRrRrRro.",
+      ".owwwwwwwwwwwwo.",
+      ".okkkwkwwkwkkko.",
+      ".owkwwkkwkwwkwo.",
+      ".owkwwkwkkwwkwo.",
+      ".owkwwkwwkwwkwo.",
+      ".owwwwwwwwwwwwo.",
+      ".oRrRrRrRrRrRro.",
+      ".oDdDdDdDdDdDdo.",
+      ".oooooooooooooo.",
+    ],
+    pal: { o: "#2b0d0b", t: "#ff6b55", r: "#d8352a", R: "#b0281f", D: "#8a1d17", d: "#a3241c", w: "#f2ede4", k: "#1d1d1d", f: "#ffcc33", s: "#8a8a8a" },
+  },
+};
+
+function drawItem(id: ItemId) {
+  const [c, ctx] = canvas(16, 16);
+  const { rows, pal } = ITEM_PIXELS[id];
+  rows.forEach((row, y) => [...row].forEach((ch, x) => ch !== "." && rect(ctx, pal[ch], x, y, 1, 1)));
+  return c;
+}
+
+const itemUrls = new Map<ItemId, string>();
+
+/** Data URL of an item's icon, for the HUD (draw it with image-rendering: pixelated). */
+export function itemIconUrl(id: ItemId): string {
+  let url = itemUrls.get(id);
+  if (!url) {
+    url = drawItem(id).toDataURL();
+    itemUrls.set(id, url);
+  }
+  return url;
+}
+
+/** The icon as a crisp texture: thrown snowballs and pearls are drawn as sprites, like Minecraft's. */
+export function itemTexture(id: ItemId) {
+  const t = new THREE.CanvasTexture(drawItem(id));
+  t.magFilter = THREE.NearestFilter;
+  t.minFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 }
 
 /** Data URL of the dirt block, for HUD icons. */
