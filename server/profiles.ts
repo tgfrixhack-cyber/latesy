@@ -132,17 +132,21 @@ export class Profiles {
     for (const [n, id] of Object.entries(this.data.names)) if (!this.data.profiles[id]) delete this.data.names[n];
   }
 
-  /** Whether `id` may play as `name`: false when another profile with progress reserved it. Taking
-   *  a free name reserves it for this profile. */
+  /** False when another profile with progress holds `name` (case-insensitive). */
+  nameFree(id: string | null, name: string): boolean {
+    const owner = this.data.names[name.toLowerCase()];
+    if (!owner || owner === id) return true;
+    const o = this.data.profiles[owner];
+    return !o || o.xp <= 0 || this.clock() - o.seen >= NAME_HOLD_MS;
+  }
+
+  /** Plays as `name` if it's free (see nameFree), reserving it for this profile. */
   claimName(id: string | null, name: string): boolean {
+    if (!this.nameFree(id, name)) return false;
+    if (!id) return true;
     const key = name.toLowerCase();
     const owner = this.data.names[key];
     const now = this.clock();
-    if (owner && owner !== id) {
-      const o = this.data.profiles[owner];
-      if (o && o.xp > 0 && now - o.seen < NAME_HOLD_MS) return false;
-    }
-    if (!id) return true;
     const p = this.get(id);
     p.name = name;
     p.seen = now;
