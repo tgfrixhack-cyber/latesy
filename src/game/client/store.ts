@@ -117,8 +117,8 @@ export interface UiState {
   wardrobe: boolean;
   /** Progress, quests and the weekly board (P). */
   profileOpen: boolean;
-  /** Quick chat menu (G). */
-  quickChat: boolean;
+  /** Emote wheel while E is held: centre on screen (px within the game view) and the hovered sector. */
+  emoteWheel: { x: number; y: number; sel: number | null } | null;
   /** Private room code, null on the public server. */
   room: string | null;
   profile: ProfileInfo | null;
@@ -191,7 +191,7 @@ export const initialUi = (): UiState => ({
   help: false,
   wardrobe: false,
   profileOpen: false,
-  quickChat: false,
+  emoteWheel: null,
   room: null,
   profile: null,
   weekly: null,
