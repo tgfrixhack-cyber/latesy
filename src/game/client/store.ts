@@ -117,8 +117,15 @@ export interface UiState {
   wardrobe: boolean;
   /** Progress, quests and the weekly board (P). */
   profileOpen: boolean;
-  /** Emote wheel while E is held: centre on screen (px within the game view) and the hovered sector. */
-  emoteWheel: { x: number; y: number; sel: number | null } | null;
+  /** Emote wheel while E is held: centre on screen (px within the game view) and the hovered sector.
+   *  `sticky`: opened by a tap on the touch button, stays until a sector (or anything else) is tapped. */
+  emoteWheel: { x: number; y: number; sel: number | null; sticky: boolean } | null;
+  /** Touch controls on screen (phones, tablets); switches with the last pointer used. */
+  touch: boolean;
+  /** What the controls drive right now (the engine's camera mode). */
+  inputMode: "orbit" | "frozen" | "play" | "spectate";
+  /** Touch aim assist: a swing turns to an enemy close to the crosshair. */
+  aimAssist: boolean;
   /** Private room code, null on the public server. */
   room: string | null;
   profile: ProfileInfo | null;
@@ -192,6 +199,9 @@ export const initialUi = (): UiState => ({
   wardrobe: false,
   profileOpen: false,
   emoteWheel: null,
+  touch: false,
+  inputMode: "orbit",
+  aimAssist: true,
   room: null,
   profile: null,
   weekly: null,

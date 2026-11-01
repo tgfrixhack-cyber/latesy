@@ -35,6 +35,8 @@ import { createStore, initialUi } from "@/game/client/store";
 import type { UiState } from "@/game/client/store";
 import { hairFor, skinFaceUrl } from "@/game/client/skins";
 import { dirtIconUrl, itemIconUrl } from "@/game/client/textures";
+import { TouchControls, enterFullscreen } from "./touch-controls";
+import type { TouchInput } from "./touch-controls";
 import { sfx } from "@/game/client/sound";
 import "./pvp.css";
 
@@ -55,9 +57,17 @@ type EngineApi = {
   answerDuel(accept: boolean): void;
   toggleWatch(): void;
   vote(i: number): void;
-};
+  challengeDuel(): void;
+  setAimAssist(on: boolean): void;
+} & TouchInput;
 
 interface HudActions {
+  /** The engine's touch input (null before it starts). */
+  input(): TouchInput | null;
+  useItem(i: number): void;
+  toggleWatch(): void;
+  challengeDuel(): void;
+  setAimAssist(on: boolean): void;
   toggleMute(): void;
   setSens(v: number): void;
   setLook(color: string, skin: SkinId, sword?: SwordKind): void;
@@ -125,10 +135,21 @@ const CONTROLS: [string, string][] = [
   ["M", "звук вкл/выкл"],
 ];
 
-function Controls({ className = "grid-cols-2" }: { className?: string }) {
+const TOUCH_CONTROLS: [string, string][] = [
+  ["Левый палец", "ходьба: где коснёшься, там и стик; до упора вперёд — бег"],
+  ["Правый палец", "обзор: веди по экрану"],
+  ["Меч", "удар и ломать блоки; держи — бьёт сам, веди по кнопке — целишься"],
+  ["Стрелка", "прыжок; прыжок и удар на падении — крит ×1.5"],
+  ["Земля", "поставить блок"],
+  ["Иконки внизу", "предметы из сундуков"],
+  ["😀", "эмоции: потяни к нужной или коснись и выбери"],
+  ["Глаз", "вид от 1-го / 3-го лица"],
+];
+
+function Controls({ className = "grid-cols-2", touch = false }: { className?: string; touch?: boolean }) {
   return (
     <ul className={`grid gap-x-4 gap-y-1 text-sm text-white/80 ${className}`}>
-      {CONTROLS.map(([k, v]) => (
+      {(touch ? TOUCH_CONTROLS : CONTROLS).map(([k, v]) => (
         <li key={k}>
           <span className="pvp-key">{k}</span> {v}
         </li>
@@ -164,13 +185,15 @@ function invitedRoom(): string | null {
   }
 }
 
-function JoinScreen({ onJoin, sens, onSens }: { onJoin: (name: string, room: string | null) => void; sens: number; onSens: (v: number) => void }) {
+function JoinScreen({ onJoin, sens, onSens, touch }: { onJoin: (name: string, room: string | null) => void; sens: number; onSens: (v: number) => void; touch: boolean }) {
   const [name, setName] = useState(() => localStorage.getItem(NAME_KEY) ?? "");
   const [invite] = useState(invitedRoom);
   const [code, setCode] = useState("");
   const go = (room: string | null) => {
     const n = name.trim().slice(0, 16);
     localStorage.setItem(NAME_KEY, n);
+    // The tap on "Play" is the user gesture fullscreen needs.
+    if (touch) enterFullscreen();
     onJoin(n, room);
   };
   const typed = normalizeRoomCode(code);
@@ -240,7 +263,7 @@ function JoinScreen({ onJoin, sens, onSens }: { onJoin: (name: string, room: str
           <li>• Последний баф раунда — «Хаос»: два сразу. Выбывшие голосуют за следующий баф клавишами 1–3.</li>
         </ul>
         <div className="mt-4">
-          <Controls />
+          <Controls touch={touch} />
         </div>
       </Panel>
     </div>
@@ -430,7 +453,7 @@ const DEATH_TEXT: Record<string, [string, string]> = {
 function KillFeed({ ui, now }: { ui: UiState; now: number }) {
   const items = ui.feed.filter((f) => now - f.at < 7000);
   return (
-    <div className="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-1 text-sm">
+    <div className={`pointer-events-none absolute right-3 flex flex-col items-end gap-1 text-sm ${top}`}>
       {items.map((f) => {
         const [withKiller, alone] = DEATH_TEXT[f.reason] ?? ["⚔", "погиб"];
         const verb = f.reason === "kill" && ui.mode === "infection" ? "заразил" : withKiller;
@@ -715,15 +738,29 @@ function RewardPanel({ r }: { r: NonNullable<UiState["reward"]> }) {
 }
 
 /** Items from chests: keys 1–5; a raised shield counts down over its slot. */
-function ItemBar({ ui, now }: { ui: UiState; now: number }) {
+function ItemBar({ ui, now, onUse }: { ui: UiState; now: number; onUse?: (i: number) => void }) {
   if (!ui.items.some((n) => n > 0) && ui.shieldUntil <= now) return null;
   return (
-    <div className="flex gap-1">
+    <div className={`flex gap-1 ${onUse ? "pointer-events-auto" : ""}`}>
       {ITEM_IDS.map((id, i) => {
         const n = ui.items[i] ?? 0;
         const shield = id === "shield" && ui.shieldUntil > now;
         return (
-          <div key={id} className={`pvp-slot pvp-item relative ${n > 0 || shield ? "" : "opacity-35"}`} title={`${ITEMS[id].title}: ${ITEMS[id].description}`}>
+          <div
+            key={id}
+            role={onUse ? "button" : undefined}
+            aria-label={onUse ? ITEMS[id].title : undefined}
+            onPointerDown={
+              onUse &&
+              ((e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onUse(i);
+              })
+            }
+            className={`pvp-slot pvp-item relative ${n > 0 || shield ? "" : "opacity-35"} ${onUse ? "active:scale-90" : ""}`}
+            title={`${ITEMS[id].title}: ${ITEMS[id].description}`}
+          >
             <span className="absolute left-1 top-0.5 text-[10px] text-white/70">{i + 1}</span>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={itemIconUrl(id)} alt={ITEMS[id].title} className="h-8 w-8 [image-rendering:pixelated]" />
@@ -763,11 +800,11 @@ function EmoteWheel({ w }: { w: NonNullable<UiState["emoteWheel"]> }) {
   );
 }
 
-function ChatLog({ ui, now }: { ui: UiState; now: number }) {
+function ChatLog({ ui, now, touch }: { ui: UiState; now: number; touch: boolean }) {
   const lines = ui.chat.filter((c) => now - c.at < 7000);
   if (!lines.length) return null;
   return (
-    <div className="pointer-events-none absolute bottom-28 left-3 space-y-0.5 text-sm">
+    <div className={`pointer-events-none absolute left-3 space-y-0.5 text-sm ${touch ? "bottom-40" : "bottom-28"}`}>
       {lines.map((c) => (
         <div key={c.key} className="pvp-outline bg-black/40 px-2 py-0.5">
           <b style={{ color: c.color }}>{c.name}</b>: {EMOTES[c.e].icon} {EMOTES[c.e].text}
@@ -1151,7 +1188,7 @@ function HubCenter({ ui, now }: { ui: UiState; now: number }) {
   return null;
 }
 
-function TrainPanel({ t }: { t: TrainStats }) {
+function TrainPanel({ t, touch }: { t: TrainStats; touch: boolean }) {
   const pct = t.hits > 0 ? Math.round((t.crits / t.hits) * 100) : 0;
   const rows: [string, string | number][] = [
     ["Удары", t.hits],
@@ -1163,7 +1200,7 @@ function TrainPanel({ t }: { t: TrainStats }) {
     ["Стрелы: уклонился / попаданий", `${t.dodged} / ${t.arrowHits}`],
   ];
   return (
-    <div className="pvp-train pointer-events-none absolute bottom-3 left-3 w-[19rem] px-3 py-2 text-xs">
+    <div className={`pvp-train pointer-events-none absolute left-3 px-3 py-2 text-xs ${touch ? "top-14 w-[15rem] origin-top-left scale-90" : "bottom-3 w-[19rem]"}`}>
       <div className="pvp-title mb-1 text-[0.65rem] text-[#ffde59]">ТРЕНИРОВКА</div>
       <dl className="grid grid-cols-[1fr_auto] gap-x-2 gap-y-0.5">
         {rows.map(([k, v]) => (
@@ -1372,30 +1409,47 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
   const overlay = ui.wardrobe || ui.help || ui.profileOpen;
   const duelActive = ui.duel?.state === "countdown" || ui.duel?.state === "fight";
   const showCrosshair = !overlay && (arena ? inRound && ui.alive && !ui.watching : true);
-  const showLockHint = !ui.locked && !overlay && !ui.emoteWheel && (arena ? inRound && !(spectating && ui.vote) : true);
+  const touch = ui.touch;
+  const showLockHint = !touch && !ui.locked && !overlay && !ui.emoteWheel && (arena ? inRound && !(spectating && ui.vote) : true);
+  // Below the touch controls' top-right row.
+  const topRight = touch ? "top-16" : "top-3";
   return (
     <>
       {ui.hurtKey > 0 && <div key={ui.hurtKey} className="pvp-hurt pointer-events-none absolute inset-0" />}
       {ui.arrowKey > 0 && <div key={`a${ui.arrowKey}`} className="pvp-arrow-flash pointer-events-none absolute inset-0" />}
+      {/* First, so the HUD's own buttons (items, votes, prompts) stay on top of it. */}
+      {touch && !overlay && <TouchControls ui={ui} input={actions.input} />}
+      {touch && <PortraitHint />}
       {inRound && ui.phase === "playing" && <BuffTint buffs={ui.buffs} />}
       {inRound && ui.alive && !ui.watching && ui.lava >= 0 && <div className="pvp-lava pointer-events-none absolute inset-0" />}
 
       {!arena && (
         <>
           <div className="pointer-events-none absolute left-1/2 top-3 flex w-max max-w-[min(32rem,56vw)] -translate-x-1/2 flex-col items-center gap-2">
-            <HubStatus ui={ui} now={now} />
+            <HubStatus ui={ui} now={now} onWatch={touch ? actions.toggleWatch : undefined} />
             <HubActivity ui={ui} now={now} />
           </div>
-          <div className="pointer-events-none absolute left-3 top-3 bg-black/45 px-2 py-1 text-sm">
-            <span className="pvp-key">H</span> помощь · <span className="pvp-key">P</span> профиль{ui.profile ? ` (ур. ${ui.profile.level})` : ""} · зажми <span className="pvp-key">E</span> — эмоции
-          </div>
+          {touch ? (
+            <div className="absolute left-3 top-3 flex gap-1.5">
+              <McButton className="!px-2.5 !py-1 text-sm" onClick={() => actions.setHelp(true)}>
+                Помощь
+              </McButton>
+              <McButton className="!px-2.5 !py-1 text-sm" onClick={() => actions.setProfile(true)}>
+                Профиль{ui.profile ? ` · ${ui.profile.level}` : ""}
+              </McButton>
+            </div>
+          ) : (
+            <div className="pointer-events-none absolute left-3 top-3 bg-black/45 px-2 py-1 text-sm">
+              <span className="pvp-key">H</span> помощь · <span className="pvp-key">P</span> профиль{ui.profile ? ` (ур. ${ui.profile.level})` : ""} · зажми <span className="pvp-key">E</span> — эмоции
+            </div>
+          )}
           {ui.room && <RoomBadge room={ui.room} onLeave={() => actions.switchRoom(null)} />}
           {ui.reward && ui.phase === "lobby" && now - ui.reward.at < ui.timings.endMs + 9000 && (
-            <div className="pointer-events-none absolute right-3 top-3 w-72">
+            <div className={`pointer-events-none absolute right-3 w-72 ${topRight}`}>
               <RewardPanel r={ui.reward} />
             </div>
           )}
-          {ui.train && <TrainPanel t={ui.train} />}
+          {ui.train && <TrainPanel t={ui.train} touch={touch} />}
           <HubCenter ui={ui} now={now} />
           {ui.hint && now - ui.hint.at < 3000 && (
             <div key={ui.hint.key} className="pvp-toast pointer-events-none absolute inset-x-0 top-[56%] flex justify-center px-4">
@@ -1403,7 +1457,21 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
             </div>
           )}
           {ui.invite && now - ui.invite.at < 15000 && <InvitePrompt ui={ui} onAnswer={actions.answerDuel} />}
-          {!duelActive && !overlay && (ui.duelTarget || ui.nearWardrobe) && (
+          {touch && !duelActive && !overlay && (ui.duelTarget || ui.nearWardrobe) && (
+            <div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 flex-col items-center gap-1.5">
+              {ui.duelTarget && (
+                <McButton tone="red" className="!px-3 !py-1.5" onClick={actions.challengeDuel}>
+                  Дуэль: <b>{ui.duelTarget.name}</b>
+                </McButton>
+              )}
+              {ui.nearWardrobe && (
+                <McButton className="!px-3 !py-1.5" onClick={() => actions.setWardrobe(true)}>
+                  Гардероб
+                </McButton>
+              )}
+            </div>
+          )}
+          {!touch && !duelActive && !overlay && (ui.duelTarget || ui.nearWardrobe) && (
             <div className="pointer-events-none absolute bottom-5 left-1/2 flex -translate-x-1/2 flex-col items-center gap-1.5 text-lg">
               {ui.duelTarget && (
                 <span className="pvp-outline bg-black/55 px-3 py-1">
@@ -1424,7 +1492,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
               </div>
             </div>
           )}
-          <Notices ui={ui} now={now} className="top-3" />
+          <Notices ui={ui} now={now} className={topRight} />
         </>
       )}
 
@@ -1432,7 +1500,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
         <>
           <TopBar ui={ui} now={now} />
           <Scoreboard ui={ui} />
-          <KillFeed ui={ui} now={now} />
+          <KillFeed ui={ui} now={now} top={topRight} />
           <Notices ui={ui} now={now} className="top-[34%]" />
           <Countdown ui={ui} now={now} />
           {ui.roulette && ui.phase === "playing" && <Roulette key={ui.roulette.key} r={ui.roulette} />}
@@ -1443,22 +1511,25 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
       )}
 
       {inRound && ui.alive && !ui.watching && (
-        <div className="pointer-events-none absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-col items-center gap-2">
+        <div className={`pointer-events-none absolute left-1/2 flex -translate-x-1/2 flex-col items-center ${touch ? "bottom-2 gap-1" : "bottom-4 gap-2"}`}>
           <div key={ui.hurtKey} className={ui.hurtKey ? "pvp-heart-shake" : ""}>
             <Hearts hp={ui.hp} max={ui.maxHp} />
           </div>
-          {ui.arrows > 0 && (
+          {/* On touch the dirt and arrow counts sit on their buttons. */}
+          {!touch && ui.arrows > 0 && (
             <div className="pvp-outline bg-black/45 px-2 py-0.5 text-lg">
               🏹 <b className="tabular-nums">{ui.arrows}</b> · <span className="pvp-key">Q</span> выстрел
             </div>
           )}
           <div className="flex items-end gap-2">
-            <div className="pvp-slot flex items-center gap-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={dirtIcon} alt="" className="h-9 w-9 [image-rendering:pixelated]" />
-              <span className="pvp-outline text-2xl tabular-nums">{ui.dirt}</span>
-            </div>
-            <ItemBar ui={ui} now={now} />
+            {!touch && (
+              <div className="pvp-slot flex items-center gap-2">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={dirtIcon} alt="" className="h-9 w-9 [image-rendering:pixelated]" />
+                <span className="pvp-outline text-2xl tabular-nums">{ui.dirt}</span>
+              </div>
+            )}
+            <ItemBar ui={ui} now={now} onUse={touch ? actions.useItem : undefined} />
           </div>
         </div>
       )}
@@ -1466,7 +1537,7 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
       {showCrosshair && <div className="pvp-crosshair pointer-events-none absolute left-1/2 top-1/2" />}
 
       {spectating && !ui.watching && ui.death && now - ui.death.at < 3200 && <DeathBanner key={ui.death.key} d={ui.death} />}
-      {spectating && <SpectatorBar ui={ui} now={now} onVote={actions.vote} />}
+      {spectating && <SpectatorBar ui={ui} now={now} onVote={actions.vote} onLobby={touch ? actions.toggleWatch : undefined} />}
 
       {showLockHint && (
         <div className="pointer-events-none absolute inset-x-0 top-[66%] text-center">
@@ -1475,15 +1546,19 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
       )}
 
       {ui.ping !== null && (
-        <div className="pvp-outline pointer-events-none absolute bottom-3.5 right-[4.75rem] bg-black/45 px-2 py-0.5 text-sm" title="Задержка до игрового сервера">
+        <div
+          className={`pvp-outline pointer-events-none absolute bg-black/45 px-2 py-0.5 text-sm ${touch ? "left-1/2 top-[calc(env(safe-area-inset-top,0px)+0.25rem)] -translate-x-1/2 text-xs opacity-0" : "bottom-3.5 right-[4.75rem]"}`}
+          title="Задержка до игрового сервера"
+        >
           Пинг <b style={{ color: ui.ping < 80 ? "#7CFC00" : ui.ping < 160 ? "#facc15" : "#ff7b7b" }}>{ui.ping}</b> мс
         </div>
       )}
 
+      {/* On touch the sound button is in the controls' top row. */}
       <button
         type="button"
         onClick={actions.toggleMute}
-        className="pvp-mute absolute bottom-3 right-3"
+        className={`pvp-mute absolute bottom-3 right-3 ${touch ? "hidden" : ""}`}
         aria-label={ui.muted ? "Включить звук" : "Выключить звук"}
         title="Звук (M)"
       >
@@ -1491,12 +1566,12 @@ function Hud({ ui, dirtIcon, actions }: { ui: UiState; dirtIcon: string; actions
         <span className="text-xs text-white/70">M</span>
       </button>
 
-      <ChatLog ui={ui} now={now} />
+      <ChatLog ui={ui} now={now} touch={touch} />
       {ui.emoteWheel && <EmoteWheel w={ui.emoteWheel} />}
       {arena && ui.phase === "ended" && <EndScreen ui={ui} now={now} />}
       {ui.wardrobe && <Wardrobe look={ui.look} myId={ui.myId} profile={ui.profile} onLook={actions.setLook} onClose={() => actions.setWardrobe(false)} />}
       {ui.profileOpen && <ProfileOverlay ui={ui} actions={actions} />}
-      {ui.help && <Help onClose={() => actions.setHelp(false)} sens={ui.sens} onSens={actions.setSens} />}
+      {ui.help && <Help onClose={() => actions.setHelp(false)} sens={ui.sens} onSens={actions.setSens} touch={touch} aimAssist={ui.aimAssist} onAimAssist={actions.setAimAssist} />}
     </>
   );
 }
@@ -1521,6 +1596,11 @@ export default function PvpGame() {
   const actions: HudActions = {
     toggleMute: () => api()?.toggleMute(),
     setSens: (v) => api()?.setSens(v),
+    input: () => api(),
+    useItem: (i) => api()?.useItem(i),
+    toggleWatch: () => api()?.toggleWatch(),
+    challengeDuel: () => api()?.challengeDuel(),
+    setAimAssist: (on) => api()?.setAimAssist(on),
     setLook: (color, skin, sword) => api()?.setLook(color, skin, sword),
     switchRoom: (room) => api()?.switchRoom(room),
     setProfile: (open) => api()?.setProfile(open),
@@ -1533,7 +1613,7 @@ export default function PvpGame() {
   return (
     <div className="pvp-root fixed inset-0 select-none overflow-hidden bg-black text-white">
       <div ref={hostRef} className="absolute inset-0" />
-      {ui.conn === "idle" && <JoinScreen onJoin={(name, room) => api()?.join(name, room)} sens={ui.sens} onSens={actions.setSens} />}
+      {ui.conn === "idle" && <JoinScreen onJoin={(name, room) => api()?.join(name, room)} sens={ui.sens} onSens={actions.setSens} touch={ui.touch} />}
       {ui.conn === "connecting" && (
         <div className="absolute inset-0 flex items-center justify-center">
           <Panel className="text-xl">Подключение к серверу…</Panel>
